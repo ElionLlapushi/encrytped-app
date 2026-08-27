@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>sealed / encrypted chat</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- LOGIN / KEY GENERATION SCREEN -->
+  <section id="login-screen" class="screen">
+    <div class="login-card">
+      <div class="eyebrow">local key generation</div>
+      <h1>sealed</h1>
+      <p class="lede">Messages are encrypted in your browser before they ever leave it. The server relays sealed envelopes it cannot open.</p>
+
+      <form id="login-form">
+        <label for="username">choose a handle</label>
+        <input id="username" name="username" autocomplete="off" placeholder="e.g. ada" required />
+        <button type="submit" id="login-btn">generate keypair &amp; enter</button>
+      </form>
+
+      <div id="key-status" class="key-status" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <span>deriving X25519 keypair in-browser…</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- MAIN CHAT SCREEN -->
+  <section id="chat-screen" class="screen" hidden>
+    <aside class="sidebar">
+      <div class="me-panel">
+        <div class="eyebrow">signed in as</div>
+        <div class="me-name" id="me-name">—</div>
+        <div class="fingerprint-row">
+          <span class="fp-label">your key fingerprint</span>
+          <div class="fingerprint" id="me-fingerprint"></div>
+        </div>
+      </div>
+
+      <div class="roster-header">
+        <span>online</span>
+        <span id="roster-count">0</span>
+      </div>
+      <ul id="roster" class="roster"></ul>
+
+      <div class="sidebar-footnote">
+        Compare fingerprints out-of-band (call, in person) before trusting a
+        conversation. Matching blocks mean no one is impersonating that key.
+      </div>
+    </aside>
+
+    <main class="chat-pane">
+      <header class="chat-header">
+        <div id="chat-with">Select someone to message</div>
+        <div id="chat-with-fp" class="fingerprint small"></div>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <form id="message-form" class="message-form">
+        <input id="message-input" autocomplete="off" placeholder="Type a message — encrypted before it's sent…" disabled />
+        <button type="submit" id="send-btn" disabled>seal &amp; send</button>
+      </form>
+    </main>
+  </section>
+
+  <script src="vendor/libsodium-sumo.js"></script>
+  <script src="vendor/libsodium-wrappers.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
