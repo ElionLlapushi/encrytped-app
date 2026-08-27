@@ -1,74 +1,228 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>sealed / encrypted chat</title>
-<link rel="stylesheet" href="style.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sealed / encrypted chat</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
+
 <body>
 
-  <!-- LOGIN / KEY GENERATION SCREEN -->
+  <!-- LOGIN SCREEN -->
   <section id="login-screen" class="screen">
+
     <div class="login-card">
-      <div class="eyebrow">local key generation</div>
+
+      <div class="eyebrow">
+        secure encrypted chat
+      </div>
+
       <h1>sealed</h1>
-      <p class="lede">Messages are encrypted in your browser before they ever leave it. The server relays sealed envelopes it cannot open.</p>
+
+      <p class="lede">
+        Messages are encrypted in your browser before they
+        leave it. Your private key never goes to the server.
+      </p>
 
       <form id="login-form">
-        <label for="username">choose a handle</label>
-        <input id="username" name="username" autocomplete="off" placeholder="e.g. ada" required />
-        <button type="submit" id="login-btn">generate keypair &amp; enter</button>
+
+        <label for="username">
+          username
+        </label>
+
+        <input
+          id="username"
+          name="username"
+          type="text"
+          autocomplete="username"
+          placeholder="e.g. ada"
+          required
+        />
+
+        <label for="password">
+          password
+        </label>
+
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          placeholder="minimum 8 characters"
+          required
+          minlength="8"
+        />
+
+        <button
+          type="submit"
+          id="login-btn"
+        >
+          login
+        </button>
+
+        <button
+          type="button"
+          id="register-btn"
+        >
+          create account
+        </button>
+
       </form>
 
-      <div id="key-status" class="key-status" hidden>
-        <div class="spinner" aria-hidden="true"></div>
-        <span>deriving X25519 keypair in-browser…</span>
+      <div
+        id="auth-error"
+        class="system-note"
+        hidden
+      ></div>
+
+      <div
+        id="key-status"
+        class="key-status"
+        hidden
+      >
+        <div
+          class="spinner"
+          aria-hidden="true"
+        ></div>
+
+        <span>
+          preparing secure connection...
+        </span>
       </div>
+
     </div>
+
   </section>
 
-  <!-- MAIN CHAT SCREEN -->
-  <section id="chat-screen" class="screen" hidden>
+
+  <!-- CHAT SCREEN -->
+
+  <section
+    id="chat-screen"
+    class="screen"
+    hidden
+  >
+
     <aside class="sidebar">
+
       <div class="me-panel">
-        <div class="eyebrow">signed in as</div>
-        <div class="me-name" id="me-name">—</div>
-        <div class="fingerprint-row">
-          <span class="fp-label">your key fingerprint</span>
-          <div class="fingerprint" id="me-fingerprint"></div>
+
+        <div class="eyebrow">
+          signed in as
         </div>
+
+        <div
+          class="me-name"
+          id="me-name"
+        >
+          —
+        </div>
+
+        <div class="fingerprint-row">
+
+          <span class="fp-label">
+            your key fingerprint
+          </span>
+
+          <div
+            class="fingerprint"
+            id="me-fingerprint"
+          ></div>
+
+        </div>
+
       </div>
+
 
       <div class="roster-header">
-        <span>online</span>
-        <span id="roster-count">0</span>
+
+        <span>
+          online
+        </span>
+
+        <span id="roster-count">
+          0
+        </span>
+
       </div>
-      <ul id="roster" class="roster"></ul>
+
+
+      <ul
+        id="roster"
+        class="roster"
+      ></ul>
+
 
       <div class="sidebar-footnote">
-        Compare fingerprints out-of-band (call, in person) before trusting a
-        conversation. Matching blocks mean no one is impersonating that key.
+
+        Compare fingerprints out-of-band
+        (call or in person) before trusting
+        a conversation.
+
       </div>
+
     </aside>
 
+
     <main class="chat-pane">
+
       <header class="chat-header">
-        <div id="chat-with">Select someone to message</div>
-        <div id="chat-with-fp" class="fingerprint small"></div>
+
+        <div id="chat-with">
+          Select someone to message
+        </div>
+
+        <div
+          id="chat-with-fp"
+          class="fingerprint small"
+        ></div>
+
       </header>
 
-      <div id="messages" class="messages"></div>
 
-      <form id="message-form" class="message-form">
-        <input id="message-input" autocomplete="off" placeholder="Type a message — encrypted before it's sent…" disabled />
-        <button type="submit" id="send-btn" disabled>seal &amp; send</button>
+      <div
+        id="messages"
+        class="messages"
+      ></div>
+
+
+      <form
+        id="message-form"
+        class="message-form"
+      >
+
+        <input
+          id="message-input"
+          type="text"
+          autocomplete="off"
+          placeholder="Type a message..."
+          disabled
+        />
+
+        <button
+          type="submit"
+          id="send-btn"
+          disabled
+        >
+          seal &amp; send
+        </button>
+
       </form>
+
     </main>
+
   </section>
+
+
+  <!-- LIBSODIUM -->
 
   <script src="vendor/libsodium-sumo.js"></script>
   <script src="vendor/libsodium-wrappers.js"></script>
+
+  <!-- APPLICATION -->
+
   <script src="app.js"></script>
+
 </body>
 </html>
