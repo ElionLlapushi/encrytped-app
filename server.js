@@ -5,8 +5,12 @@ const crypto = require("crypto");
 const argon2 = require("argon2");
 const { Pool } = require("pg");
 const { WebSocketServer } = require("ws");
+const rateLimit = require("express-rate-limit");
 
 const app = express();
+
+app.set("trust proxy", 1);
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
@@ -147,6 +151,31 @@ async function getUserFromToken(token) {
 }
 
 /* =========================
+   RATE LIMITING
+========================= */
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,                    // 5 attempts per window
+  message: { error: "Too many login attempts. Try again later." },
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Key on IP + username, so one abusive IP can't lock out
+  // everyone else, and repeated tries against one account
+  // from different IPs are still capped per-account too
+  // isn't handled here (see note below) — this is IP+user.
+  keyGenerator: (req) => `${req.ip}:${normalizeUsername(req.body?.username)}`,
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3,                    // 3 new accounts per IP per hour
+  message: { error: "Too many accounts created from this IP. Try again later." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/* =========================
    HEALTH
 ========================= */
 
@@ -172,7 +201,7 @@ app.get("/health", async (req, res) => {
    REGISTER
 ========================= */
 
-app.post("/api/register", async (req, res) => {
+app.post("/api/register", registerLimiter, async (req, res) => {
   try {
     const username = normalizeUsername(req.body.username);
     const password = req.body.password;
@@ -247,7 +276,7 @@ app.post("/api/register", async (req, res) => {
    LOGIN
 ========================= */
 
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", loginLimiter, async (req, res) => {
   try {
     const username = normalizeUsername(req.body.username);
     const password = req.body.password;
