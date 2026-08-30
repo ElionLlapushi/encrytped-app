@@ -264,6 +264,302 @@ function ensureKeyPair() {
 }
 
 /* =========================
+   FORWARD SECRECY (simplified Double Ratchet)
+   =========================
+   This is an educational, simplified ratchet built on
+   libsodium primitives: X25519 DH-ratchet + a symmetric
+   KDF chain (BLAKE2b-based) for per-message keys.
+
+   Known limitations vs. real Signal/libsignal:
+   - No skipped-message-key cache: messages must be
+     decrypted in the order they were encrypted, per
+     direction. A lost message can stall later ones in
+     that chain until a new DH ratchet step happens.
+   - No X3DH prekey bundles: the very first message in a
+     conversation bootstraps off the long-term identity
+     keys already published via the server directory,
+     same trust model the app already had.
+   For production use, prefer an audited library such as
+   @signalapp/libsignal-client.
+========================= */
+
+function concatBytes(...arrays) {
+  const total = arrays.reduce(
+    (sum, a) => sum + a.length,
+    0
+  );
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+
+  for (const a of arrays) {
+    out.set(a, offset);
+    offset += a.length;
+  }
+
+  return out;
+}
+
+function kdfRootChain(rootKey, dhOutput) {
+  const material = sodium.crypto_generichash(
+    64,
+    concatBytes(rootKey, dhOutput)
+  );
+
+  return {
+    newRootKey: material.slice(0, 32),
+    chainKey: material.slice(32, 64)
+  };
+}
+
+function kdfChainStep(chainKey) {
+  const messageKey = sodium.crypto_generichash(
+    32,
+    concatBytes(chainKey, new Uint8Array([0x01]))
+  );
+
+  const nextChainKey = sodium.crypto_generichash(
+    32,
+    concatBytes(chainKey, new Uint8Array([0x02]))
+  );
+
+  return { messageKey, nextChainKey };
+}
+
+function ratchetStorageKey(contactUsername) {
+  return `sealed_ratchet_${myUsername}_${contactUsername}`;
+}
+
+function loadRatchetState(contactUsername) {
+  try {
+    const raw = localStorage.getItem(
+      ratchetStorageKey(contactUsername)
+    );
+
+    if (!raw) return null;
+
+    const p = JSON.parse(raw);
+
+    return {
+      rootKey: sodium.from_base64(p.rootKey),
+      ratchetPrivateKey: p.ratchetPrivateKey
+        ? sodium.from_base64(p.ratchetPrivateKey)
+        : null,
+      ratchetPublicKey: p.ratchetPublicKey
+        ? sodium.from_base64(p.ratchetPublicKey)
+        : null,
+      remoteRatchetPublicKey: p.remoteRatchetPublicKey
+        ? sodium.from_base64(p.remoteRatchetPublicKey)
+        : null,
+      sendChainKey: p.sendChainKey
+        ? sodium.from_base64(p.sendChainKey)
+        : null,
+      recvChainKey: p.recvChainKey
+        ? sodium.from_base64(p.recvChainKey)
+        : null,
+      sendMessageNumber: p.sendMessageNumber || 0,
+      recvMessageNumber: p.recvMessageNumber || 0,
+      needsSendRatchet: !!p.needsSendRatchet
+    };
+  } catch (error) {
+    console.error("Ratchet state load error:", error);
+    return null;
+  }
+}
+
+function saveRatchetState(contactUsername, state) {
+  localStorage.setItem(
+    ratchetStorageKey(contactUsername),
+    JSON.stringify({
+      rootKey: sodium.to_base64(state.rootKey),
+      ratchetPrivateKey: state.ratchetPrivateKey
+        ? sodium.to_base64(state.ratchetPrivateKey)
+        : null,
+      ratchetPublicKey: state.ratchetPublicKey
+        ? sodium.to_base64(state.ratchetPublicKey)
+        : null,
+      remoteRatchetPublicKey: state.remoteRatchetPublicKey
+        ? sodium.to_base64(state.remoteRatchetPublicKey)
+        : null,
+      sendChainKey: state.sendChainKey
+        ? sodium.to_base64(state.sendChainKey)
+        : null,
+      recvChainKey: state.recvChainKey
+        ? sodium.to_base64(state.recvChainKey)
+        : null,
+      sendMessageNumber: state.sendMessageNumber,
+      recvMessageNumber: state.recvMessageNumber,
+      needsSendRatchet: state.needsSendRatchet
+    })
+  );
+}
+
+function initRatchetState(theirIdentityPublicKeyB64) {
+  /*
+   * Bootstrap secret: DH between our long-term identity
+   * key and their long-term identity key. Both sides
+   * compute the same value (ECDH is symmetric), so this
+   * gives a shared starting point before any ratchet
+   * keys have been exchanged.
+   */
+  const dh0 = sodium.crypto_scalarmult(
+    myKeyPair.privateKey,
+    sodium.from_base64(theirIdentityPublicKeyB64)
+  );
+
+  const rootKey = sodium.crypto_generichash(32, dh0);
+
+  return {
+    rootKey,
+    /*
+     * ratchetPrivateKey/PublicKey stay null until we send
+     * our own first ratcheted message. Until then, the
+     * only public value the peer could have known about
+     * us is our long-term identity key, so that's what
+     * gets used as the DH partner on the receiving side.
+     */
+    ratchetPrivateKey: null,
+    ratchetPublicKey: null,
+    remoteRatchetPublicKey: null,
+    sendChainKey: null,
+    recvChainKey: null,
+    sendMessageNumber: 0,
+    recvMessageNumber: 0,
+    needsSendRatchet: false
+  };
+}
+
+function getSendingMessageKey(
+  contactUsername,
+  theirIdentityPublicKeyB64
+) {
+  let state = loadRatchetState(contactUsername);
+
+  if (!state) {
+    state = initRatchetState(theirIdentityPublicKeyB64);
+  }
+
+  if (!state.sendChainKey || state.needsSendRatchet) {
+    /*
+     * Start a fresh sending chain: generate a brand new
+     * ratchet keypair and DH it against the peer's most
+     * recent known ratchet key (or their identity key, if
+     * this is the very first message we've ever sent them).
+     */
+    const freshKeyPair = sodium.crypto_box_keypair();
+
+    const dhPartnerPublicKey =
+      state.remoteRatchetPublicKey ||
+      sodium.from_base64(theirIdentityPublicKeyB64);
+
+    const dh = sodium.crypto_scalarmult(
+      freshKeyPair.privateKey,
+      dhPartnerPublicKey
+    );
+
+    const { newRootKey, chainKey } = kdfRootChain(
+      state.rootKey,
+      dh
+    );
+
+    state.rootKey = newRootKey;
+    state.ratchetPrivateKey = freshKeyPair.privateKey;
+    state.ratchetPublicKey = freshKeyPair.publicKey;
+    state.sendChainKey = chainKey;
+    state.sendMessageNumber = 0;
+    state.needsSendRatchet = false;
+  }
+
+  const { messageKey, nextChainKey } = kdfChainStep(
+    state.sendChainKey
+  );
+
+  state.sendChainKey = nextChainKey;
+  state.sendMessageNumber += 1;
+
+  saveRatchetState(contactUsername, state);
+
+  return {
+    messageKey,
+    ratchetPublicKeyB64: sodium.to_base64(
+      state.ratchetPublicKey
+    )
+  };
+}
+
+function getReceivingMessageKey(
+  contactUsername,
+  theirIdentityPublicKeyB64,
+  senderRatchetPublicKeyB64
+) {
+  let state = loadRatchetState(contactUsername);
+
+  if (!state) {
+    state = initRatchetState(theirIdentityPublicKeyB64);
+  }
+
+  if (senderRatchetPublicKeyB64) {
+    const currentB64 = state.remoteRatchetPublicKey
+      ? sodium.to_base64(state.remoteRatchetPublicKey)
+      : null;
+
+    if (currentB64 !== senderRatchetPublicKeyB64) {
+      /*
+       * Peer has switched to a new ratchet key: perform a
+       * DH ratchet step for our receiving chain. Use
+       * whichever private key the sender would have
+       * targeted: our own current ratchet key if we've
+       * already sent them a message before (and thus
+       * announced a ratchet public key), otherwise our
+       * long-term identity key — the only public value
+       * they could have known about us beforehand.
+       * Also flag that OUR next send should generate a
+       * fresh key, so the ratchet keeps turning both
+       * directions.
+       */
+      const senderRatchetPublicKey = sodium.from_base64(
+        senderRatchetPublicKeyB64
+      );
+
+      const myDhPrivateKey =
+        state.ratchetPrivateKey || myKeyPair.privateKey;
+
+      const dh = sodium.crypto_scalarmult(
+        myDhPrivateKey,
+        senderRatchetPublicKey
+      );
+
+      const { newRootKey, chainKey } = kdfRootChain(
+        state.rootKey,
+        dh
+      );
+
+      state.rootKey = newRootKey;
+      state.recvChainKey = chainKey;
+      state.recvMessageNumber = 0;
+      state.remoteRatchetPublicKey = senderRatchetPublicKey;
+      state.needsSendRatchet = true;
+    }
+  }
+
+  if (!state.recvChainKey) {
+    saveRatchetState(contactUsername, state);
+    return null;
+  }
+
+  const { messageKey, nextChainKey } = kdfChainStep(
+    state.recvChainKey
+  );
+
+  state.recvChainKey = nextChainKey;
+  state.recvMessageNumber += 1;
+
+  saveRatchetState(contactUsername, state);
+
+  return messageKey;
+}
+
+/* =========================
    REGISTER
 ========================= */
 
@@ -591,7 +887,8 @@ function handleServerMessage(msg) {
         decryptFrom(
           msg.from,
           msg.nonce,
-          msg.ciphertext
+          msg.ciphertext,
+          msg.ratchetPublicKey
         );
 
       if (plaintext === null) {
@@ -881,19 +1178,22 @@ function sendMessage() {
   }
 
   try {
+    const { messageKey, ratchetPublicKeyB64 } =
+      getSendingMessageKey(
+        activeChat,
+        recipientPublicKey
+      );
+
     const nonce =
       sodium.randombytes_buf(
-        sodium.crypto_box_NONCEBYTES
+        sodium.crypto_secretbox_NONCEBYTES
       );
 
     const ciphertext =
-      sodium.crypto_box_easy(
+      sodium.crypto_secretbox_easy(
         text,
         nonce,
-        sodium.from_base64(
-          recipientPublicKey
-        ),
-        myKeyPair.privateKey
+        messageKey
       );
 
     ws.send(
@@ -908,6 +1208,8 @@ function sendMessage() {
           sodium.to_base64(
             ciphertext
           ),
+        ratchetPublicKey:
+          ratchetPublicKeyB64,
       })
     );
 
@@ -945,7 +1247,8 @@ function sendMessage() {
 function decryptFrom(
   fromUsername,
   nonceB64,
-  ciphertextB64
+  ciphertextB64,
+  ratchetPublicKeyB64
 ) {
   const senderPublicKeyB64 =
     roster.get(fromUsername);
@@ -955,18 +1258,26 @@ function decryptFrom(
   }
 
   try {
+    const messageKey =
+      getReceivingMessageKey(
+        fromUsername,
+        senderPublicKeyB64,
+        ratchetPublicKeyB64
+      );
+
+    if (!messageKey) {
+      return null;
+    }
+
     const opened =
-      sodium.crypto_box_open_easy(
+      sodium.crypto_secretbox_open_easy(
         sodium.from_base64(
           ciphertextB64
         ),
         sodium.from_base64(
           nonceB64
         ),
-        sodium.from_base64(
-          senderPublicKeyB64
-        ),
-        myKeyPair.privateKey
+        messageKey
       );
 
     return sodium.to_string(
@@ -1081,4 +1392,3 @@ document.addEventListener(
     }
   }
 );
-
