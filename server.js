@@ -74,6 +74,7 @@ async function initDatabase() {
       sender_username VARCHAR(32) NOT NULL,
       nonce TEXT NOT NULL,
       ciphertext TEXT NOT NULL,
+      ratchet_public_key TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
@@ -537,7 +538,7 @@ wss.on("connection", (ws) => {
 
         const queued = await pool.query(
           `
-            SELECT id, sender_username, nonce, ciphertext, created_at
+            SELECT id, sender_username, nonce, ciphertext, ratchet_public_key, created_at
             FROM message_queue
             WHERE recipient_id = $1
             ORDER BY created_at ASC
@@ -552,6 +553,7 @@ wss.on("connection", (ws) => {
               from: row.sender_username,
               nonce: row.nonce,
               ciphertext: row.ciphertext,
+              ratchetPublicKey: row.ratchet_public_key || null,
               timestamp: new Date(row.created_at).getTime()
             });
           }
@@ -629,6 +631,12 @@ wss.on("connection", (ws) => {
        * IMPORTANT:
        * "from" is never accepted from the browser.
        * It comes from the authenticated session.
+       *
+       * "ratchetPublicKey" is opaque to the server too —
+       * it's the sender's current DH-ratchet public key,
+       * needed by the recipient to advance their own
+       * ratchet. It is optional: only present on the
+       * first message of a new sending chain.
        */
 
       const envelope = {
@@ -636,6 +644,7 @@ wss.on("connection", (ws) => {
         from: currentUser,
         nonce: msg.nonce,
         ciphertext: msg.ciphertext,
+        ratchetPublicKey: msg.ratchetPublicKey || null,
         timestamp: Date.now()
       };
 
@@ -666,11 +675,17 @@ wss.on("connection", (ws) => {
         await pool.query(
           `
             INSERT INTO message_queue
-              (recipient_id, sender_username, nonce, ciphertext)
+              (recipient_id, sender_username, nonce, ciphertext, ratchet_public_key)
             VALUES
-              ($1, $2, $3, $4)
+              ($1, $2, $3, $4, $5)
           `,
-          [recipientId, currentUser, msg.nonce, msg.ciphertext]
+          [
+            recipientId,
+            currentUser,
+            msg.nonce,
+            msg.ciphertext,
+            msg.ratchetPublicKey || null
+          ]
         );
       } catch (error) {
         console.error("Queueing offline message failed:", error);
