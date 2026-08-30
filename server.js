@@ -61,6 +61,28 @@ async function initDatabase() {
     ON sessions(expires_at)
   `);
 
+  /*
+   * message_queue holds ONLY opaque ciphertext for
+   * recipients who are offline. The server never
+   * stores plaintext and never sees the private keys
+   * needed to decrypt these rows.
+   */
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS message_queue (
+      id BIGSERIAL PRIMARY KEY,
+      recipient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      sender_username VARCHAR(32) NOT NULL,
+      nonce TEXT NOT NULL,
+      ciphertext TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS message_queue_recipient_idx
+    ON message_queue(recipient_id, created_at)
+  `);
+
   console.log("Database initialized.");
 }
 
@@ -423,7 +445,6 @@ app.put("/api/me/public-key", async (req, res) => {
 ========================= */
 
 const clients = new Map();
-const offlineQueue = new Map();
 
 function send(ws, message) {
   if (ws && ws.readyState === ws.OPEN) {
@@ -514,14 +535,34 @@ wss.on("connection", (ws) => {
 
         broadcastUserList();
 
-        const queued = offlineQueue.get(currentUser);
+        const queued = await pool.query(
+          `
+            SELECT id, sender_username, nonce, ciphertext, created_at
+            FROM message_queue
+            WHERE recipient_id = $1
+            ORDER BY created_at ASC
+          `,
+          [currentUserId]
+        );
 
-        if (queued && queued.length) {
-          for (const envelope of queued) {
-            send(ws, envelope);
+        if (queued.rows.length) {
+          for (const row of queued.rows) {
+            send(ws, {
+              type: "message",
+              from: row.sender_username,
+              nonce: row.nonce,
+              ciphertext: row.ciphertext,
+              timestamp: new Date(row.created_at).getTime()
+            });
           }
 
-          offlineQueue.delete(currentUser);
+          await pool.query(
+            `
+              DELETE FROM message_queue
+              WHERE recipient_id = $1
+            `,
+            [currentUserId]
+          );
         }
       } catch (error) {
         console.error("WebSocket auth error:", error);
@@ -602,12 +643,37 @@ wss.on("connection", (ws) => {
 
       if (recipient) {
         send(recipient.ws, envelope);
-      } else {
-        if (!offlineQueue.has(msg.to)) {
-          offlineQueue.set(msg.to, []);
-        }
+        return;
+      }
 
-        offlineQueue.get(msg.to).push(envelope);
+      /*
+       * Recipient is offline: persist the opaque
+       * {nonce, ciphertext} pair so it survives a
+       * server restart. We look up their id by
+       * username since we only keep ids for
+       * connected clients in memory.
+       */
+      try {
+        const recipientRow = await pool.query(
+          `SELECT id FROM users WHERE username = $1`,
+          [msg.to]
+        );
+
+        const recipientId = recipientRow.rows[0]?.id;
+
+        if (!recipientId) return;
+
+        await pool.query(
+          `
+            INSERT INTO message_queue
+              (recipient_id, sender_username, nonce, ciphertext)
+            VALUES
+              ($1, $2, $3, $4)
+          `,
+          [recipientId, currentUser, msg.nonce, msg.ciphertext]
+        );
+      } catch (error) {
+        console.error("Queueing offline message failed:", error);
       }
     }
   });
@@ -641,6 +707,25 @@ setInterval(async () => {
   } catch (error) {
     console.error(
       "Session cleanup error:",
+      error.message
+    );
+  }
+}, 60 * 60 * 1000);
+
+/*
+ * Drop queued messages nobody has picked up after 30
+ * days. This is a storage/hygiene bound, not a security
+ * feature — it doesn't add forward secrecy on its own.
+ */
+setInterval(async () => {
+  try {
+    await pool.query(`
+      DELETE FROM message_queue
+      WHERE created_at <= NOW() - INTERVAL '30 days'
+    `);
+  } catch (error) {
+    console.error(
+      "Message queue cleanup error:",
       error.message
     );
   }
