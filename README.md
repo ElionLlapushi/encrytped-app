@@ -1,84 +1,215 @@
-# sealed — a minimal end-to-end encrypted chat app
+# 🔐 Encrypted App
 
-A working demo of E2EE chat: the server relays messages it cannot read.
+> A real-time end-to-end encrypted messaging application built with Node.js, WebSockets, PostgreSQL and modern cryptographic primitives.
 
-## How the encryption works
+## 🚀 What is Encrypted App?
 
-- Each browser generates an **X25519 keypair** locally on first use (via
-  [libsodium](https://libsodium.gitbook.io/doc/)), using `crypto_box_keypair()`.
-  The **private key never leaves the browser** — it's stored in
-  `localStorage` and never sent over the network.
-- Public keys are shared openly through the server (that's what makes them
-  "public").
-- To send a message, the client calls
-  `crypto_box_easy(plaintext, nonce, recipientPublicKey, myPrivateKey)` —
-  this is the NaCl "box" construction: X25519 key exchange + XSalsa20-Poly1305
-  authenticated encryption. It gives you:
-  - **Confidentiality** — only the recipient's private key can open it.
-  - **Authenticity** — the recipient can be sure it was sent by the holder of
-    the claimed sender's private key (forged senders fail decryption).
-- The server (`server.js`) only ever touches usernames, public keys, and
-  opaque `{nonce, ciphertext}` blobs. Grep the file — there's no decryption
-  code there because it doesn't have the keys to do it.
+Encrypted App is a secure real-time messaging platform built around one fundamental idea:
 
-## Fingerprints (verify before you trust)
+> **Your messages should belong to you — not the server.**
 
-Each user's sidebar shows a strip of colored blocks derived from a hash of
-their public key. **This matters**: without verifying it, a malicious or
-compromised server could hand you the wrong public key and quietly
-man-in-the-middle your "encrypted" chat. Compare fingerprints with your
-contact over a different channel (phone call, in person) the first time you
-talk — same idea as Signal's "safety numbers."
+Messages are encrypted on the client side before being transmitted through the server.
 
-## Running it
+The server is responsible for authentication, communication and data storage, but does not need access to the plaintext message content.
 
-```bash
-npm install
-npm start
-```
+## ✨ Features
 
-Then open `http://localhost:3000` in two different browser profiles (or one
-normal + one incognito window) to chat with yourself under two handles.
+- 🔐 End-to-End Encryption
+- 🔑 X25519 key exchange
+- 🔄 Simplified Double Ratchet mechanism
+- 🧂 Argon2 password hashing
+- 🛡️ Secure session management
+- 👤 Public key fingerprints
+- ⚡ Real-time messaging with WebSockets
+- 🗄️ PostgreSQL database
+- 🚦 Rate limiting
+- 🌐 Client-side encryption and decryption
 
-## What this demo does *not* give you yet
+## 🔒 How It Works
 
-Be upfront with your users about these gaps if you ship this:
+```text
+        SENDER
+          │
+          │ Plaintext message
+          ▼
+   ┌─────────────────┐
+   │ Client-side     │
+   │ Encryption      │
+   └────────┬────────┘
+            │
+            │ Ciphertext
+            ▼
+   ┌─────────────────┐
+   │     SERVER      │
+   │                 │
+   │ Authentication  │
+   │ WebSocket       │
+   │ Routing         │
+   │ PostgreSQL      │
+   └────────┬────────┘
+            │
+            │ Ciphertext
+            ▼
+   ┌─────────────────┐
+   │ Client-side     │
+   │ Decryption      │
+   └────────┬────────┘
+            │
+            ▼
+        RECEIVER
+🧠 Security Architecture
 
-1. **No forward secrecy.** Every message to a given contact is encrypted
-   with the same long-term keypair. If a private key is ever stolen, an
-   attacker who recorded past ciphertext can decrypt all of it. Signal's
-   Double Ratchet fixes this by rotating keys per-message.
-   → To upgrade: look at `libsignal-protocol-javascript` or the newer
-   `@signalapp/libsignal-client` bindings, which implement X3DH + Double
-   Ratchet.
-2. **No real authentication.** Anyone can register any free username — there's
-   no password, no account recovery, no protection against someone else
-   registering your handle first. Add real auth (e.g. WebAuthn or a
-   password + server-side session) in front of the WebSocket registration.
-3. **No persistence.** Messages to offline users are queued in memory only
-   and lost on server restart. For production, store the *ciphertext* queue
-   in a real database (Postgres/Redis) — never store plaintext.
-4. **No transport encryption in this demo config.** Run this behind TLS
-   (`wss://`, e.g. via a reverse proxy like Caddy or nginx with Let's
-   Encrypt) in any real deployment. E2EE protects message content even over
-   plain WebSocket, but TLS still matters for metadata and to stop
-   downgrade/injection attacks on the connection itself.
-5. **No group chat.** This is 1:1 only. Group E2EE (encrypting once per
-   recipient, or a shared group key with member management) is meaningfully
-   more complex — ask if you want to go there next.
-6. **Key backup/multi-device.** Right now a key lives in one browser's
-   `localStorage`. Losing that browser's storage means losing the ability to
-   read old messages and losing your identity. Real apps solve this with
-   encrypted key backup or per-device keys + a linking flow.
+The application separates user authentication from message encryption.
 
-## File layout
+The encryption process happens on the client side. The server primarily handles authentication, message routing and persistent application data.
 
-```
-encrypted-chat/
-├── server.js           # WebSocket relay — never decrypts anything
+This design minimizes the amount of sensitive information that the server needs to access.
+
+🔐 Cryptography
+
+X25519
+
+X25519 is used for secure key agreement between clients.
+
+SecretBox
+
+Authenticated symmetric encryption is used to protect sensitive data and messages.
+
+Argon2
+
+Argon2 is used for secure password hashing.
+
+Passwords are never stored as plaintext.
+
+Key Ratcheting
+
+The application includes a simplified Double Ratchet-inspired mechanism that allows encryption keys to evolve during a conversation.
+
+⚠️ This is an educational implementation and should not be considered equivalent to Signal’s production-grade protocol.
+
+⚡ Real-Time Communication
+
+The application uses WebSockets to provide real-time communication between connected clients.
+
+Instead of repeatedly polling the server, clients maintain a persistent WebSocket connection for fast message delivery.
+
+🛡️ Authentication & Sessions
+
+The backend includes:
+
+* Password hashing with Argon2
+* Session-based authentication
+* Hashed session tokens
+* Session expiration
+* Server-side user identification
+* Rate limiting
+
+The server derives the authenticated user’s identity from the session rather than trusting a user-supplied from field.
+
+🗄️ Database
+
+PostgreSQL is used for persistent application data.
+
+The database layer is responsible for application information such as:
+
+* Users
+* Authentication sessions
+* Public keys
+* Encrypted message data
+📂 Project Structure
+encrypted-app/
+│
+├── public/
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
+│
+├── server.js
 ├── package.json
-└── public/
-    ├── index.html
-    ├── style.css
-    └── app.js           # all crypto happens here, client-side
-```
+├── package-lock.json
+├── .env
+├── .gitignore
+└── README.md
+⚙️ Installation
+1. Clone the repository
+git clone https://github.com/ElionLlapushi/encrytped-app.git
+cd encrytped-app
+2.Install dependencies
+npm install
+1. Configure environment variables
+PORT=3000
+DATABASE_URL=your_postgresql_connection_string
+SESSION_SECRET=your_secure_secret
+4. Start the application
+npm start
+Then open:
+http://localhost:3000
+🧪 Testing
+
+Testing is an important area for further development.
+
+Planned tests include:
+
+* Authentication
+* Encryption and decryption
+* Key exchange
+* Session handling
+* WebSocket communication
+* Database operations
+* Rate limiting
+
+🔮 Future Improvements
+
+* Complete Double Ratchet implementation
+* X3DH / pre-key system
+* Offline message support
+* Multi-device support
+* Message expiration
+* Encrypted file sharing
+* Group conversations
+* Better key management
+* Automated security tests
+* Docker deployment
+* CI/CD pipeline
+* Security audit
+
+🎯 Why I Built This
+
+This project was created to explore how modern web applications can combine:
+
+Software Engineering + Networking + Databases + Applied Cryptography 
+⚠️ Security Disclaimer
+
+This project is primarily an educational and portfolio project exploring practical cryptography and secure application architecture.
+
+It should not be considered production-ready cryptographic software.
+
+The simplified ratchet implementation does not provide all the guarantees and protections of mature protocols such as Signal.
+
+For production messaging systems, established and professionally audited cryptographic protocols and libraries should be preferred.
+
+👨‍💻 Author
+
+Elion Llapushi
+
+Epoka Software Engineering Student interested in:
+
+* Backend Development
+* Cryptography
+* Distributed Systems
+
+Highlights
+
+🔐 End-to-End Encryption
+⚡ Real-Time WebSockets
+🔑 X25519 Key Exchange
+🔄 Key Ratcheting
+🧂 Argon2 Password Hashing
+🐘 PostgreSQL
+🟢 Node.js
+
+Security is not just about hiding data.
+It’s about designing systems that don’t need to trust everyone in the first place. 🔐
+
+
+
