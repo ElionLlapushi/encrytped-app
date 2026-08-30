@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -5,7 +7,7 @@ const crypto = require("crypto");
 const argon2 = require("argon2");
 const { Pool } = require("pg");
 const { WebSocketServer } = require("ws");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const app = express();
 
@@ -160,10 +162,6 @@ const loginLimiter = rateLimit({
   message: { error: "Too many login attempts. Try again later." },
   standardHeaders: true,
   legacyHeaders: false,
-  // Key on IP + username, so one abusive IP can't lock out
-  // everyone else, and repeated tries against one account
-  // from different IPs are still capped per-account too
-  // isn't handled here (see note below) — this is IP+user.
   keyGenerator: (req) => `${req.ip}:${normalizeUsername(req.body?.username)}`,
 });
 
@@ -816,3 +814,4 @@ async function shutdown(signal) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+

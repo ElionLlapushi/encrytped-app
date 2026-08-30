@@ -36,35 +36,105 @@ function loadAuth() {
   }
 }
 
-function saveIdentity() {
-  if (!myKeyPair || !myUsername) return;
+/*
+ * The private key is never stored in plaintext. It is
+ * encrypted with a key derived from the user's password
+ * (via Argon2id / crypto_pwhash) before it touches
+ * localStorage. Losing the password means losing access
+ * to this identity — there is no recovery path, by design:
+ * a recoverable key would defeat the point of encrypting it.
+ */
+
+function deriveKeyFromPassword(password, saltBytes) {
+  return sodium.crypto_pwhash(
+    32,
+    password,
+    saltBytes,
+    sodium.crypto_pwhash_OPSLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_MEMLIMIT_INTERACTIVE,
+    sodium.crypto_pwhash_ALG_DEFAULT
+  );
+}
+
+function saveIdentity(password) {
+  if (!myKeyPair || !myUsername || !password) return;
+
+  const salt = sodium.randombytes_buf(
+    sodium.crypto_pwhash_SALTBYTES
+  );
+
+  const derivedKey = deriveKeyFromPassword(
+    password,
+    salt
+  );
+
+  const nonce = sodium.randombytes_buf(
+    sodium.crypto_secretbox_NONCEBYTES
+  );
+
+  const encryptedPrivateKey =
+    sodium.crypto_secretbox_easy(
+      myKeyPair.privateKey,
+      nonce,
+      derivedKey
+    );
 
   localStorage.setItem(
     "sealed_identity",
     JSON.stringify({
       username: myUsername,
       publicKey: sodium.to_base64(myKeyPair.publicKey),
-      privateKey: sodium.to_base64(myKeyPair.privateKey),
+      salt: sodium.to_base64(salt),
+      nonce: sodium.to_base64(nonce),
+      encryptedPrivateKey: sodium.to_base64(
+        encryptedPrivateKey
+      ),
     })
   );
 }
 
-function loadIdentity() {
+/*
+ * Reads the stored identity WITHOUT decrypting it. Used
+ * to check whether a stored identity exists / matches the
+ * username being logged in, before we have a password.
+ */
+function loadRawIdentity() {
   try {
     const raw = localStorage.getItem("sealed_identity");
 
     if (!raw) return null;
 
-    const parsed = JSON.parse(raw);
-
-    return {
-      username: parsed.username,
-      publicKey: sodium.from_base64(parsed.publicKey),
-      privateKey: sodium.from_base64(parsed.privateKey),
-    };
+    return JSON.parse(raw);
   } catch {
     return null;
   }
+}
+
+/*
+ * Decrypts the stored identity using the given password.
+ * Throws if the password is wrong or the data is corrupt —
+ * callers must catch this and show an appropriate error.
+ */
+function decryptIdentity(password, stored) {
+  const salt = sodium.from_base64(stored.salt);
+  const derivedKey = deriveKeyFromPassword(password, salt);
+  const nonce = sodium.from_base64(stored.nonce);
+
+  const encryptedPrivateKey = sodium.from_base64(
+    stored.encryptedPrivateKey
+  );
+
+  const privateKey = sodium.crypto_secretbox_open_easy(
+    encryptedPrivateKey,
+    nonce,
+    derivedKey
+  );
+
+  return {
+    username: stored.username,
+    publicKey: sodium.from_base64(stored.publicKey),
+    privateKey,
+  };
 }
 
 /* =========================
@@ -258,8 +328,6 @@ function ensureKeyPair() {
   if (!myKeyPair) {
     myKeyPair =
       sodium.crypto_box_keypair();
-
-    saveIdentity();
   }
 }
 
@@ -614,7 +682,7 @@ async function register() {
       result.user.username;
 
     saveAuth();
-    saveIdentity();
+    saveIdentity(password);
 
     connectWebSocket();
   } catch (error) {
@@ -669,20 +737,40 @@ async function login() {
     myUsername =
       result.user.username;
 
-    const stored =
-      loadIdentity();
+    const stored = loadRawIdentity();
 
     if (
       stored &&
       stored.username === myUsername
     ) {
-      myKeyPair = stored;
+      try {
+        myKeyPair = decryptIdentity(
+          password,
+          stored
+        );
+      } catch (error) {
+        console.error(
+          "Identity decrypt error:",
+          error
+        );
+
+        showAuthError(
+          "This password does not match the encrypted key stored in this browser. " +
+          "If you changed your password elsewhere, or this is a different browser, " +
+          "your old key can't be recovered here — a new key will be generated the next " +
+          "time you log in from a browser with no stored identity for this account."
+        );
+
+        setLoading(false);
+
+        return;
+      }
     } else {
       ensureKeyPair();
+      saveIdentity(password);
     }
 
     saveAuth();
-    saveIdentity();
 
     /*
      * Keep the server's current
@@ -823,7 +911,6 @@ function handleServerMessage(msg) {
         msg.username;
 
       saveAuth();
-      saveIdentity();
 
       setLoading(false);
       showChatScreen();
@@ -1348,37 +1435,35 @@ document.addEventListener(
       }
 
       /*
-       * Restore previous session.
+       * Session restore: we can prefill the username as a
+       * convenience, but we can NOT auto-connect anymore.
+       * The private key is encrypted with the password, and
+       * the password isn't stored anywhere — the user must
+       * re-enter it (via the login form) to unlock it. This
+       * is intentional: an auto-unlocking key would defeat
+       * the purpose of encrypting it in the first place.
        */
       const savedAuth =
         loadAuth();
 
-      const savedIdentity =
-        loadIdentity();
-
       if (
         savedAuth &&
-        savedAuth.token &&
         savedAuth.username
       ) {
-        authToken =
-          savedAuth.token;
+        const usernameInput =
+          el("username");
 
-        myUsername =
-          savedAuth.username;
-
-        if (
-          savedIdentity &&
-          savedIdentity.username ===
-            myUsername
-        ) {
-          myKeyPair =
-            savedIdentity;
-        } else {
-          ensureKeyPair();
+        if (usernameInput) {
+          usernameInput.value =
+            savedAuth.username;
         }
 
-        connectWebSocket();
+        const passwordInput =
+          el("password");
+
+        if (passwordInput) {
+          passwordInput.focus();
+        }
       }
     } catch (error) {
       console.error(
@@ -1392,3 +1477,4 @@ document.addEventListener(
     }
   }
 );
+
