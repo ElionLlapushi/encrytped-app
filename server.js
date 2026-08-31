@@ -162,7 +162,7 @@ const loginLimiter = rateLimit({
   message: { error: "Too many login attempts. Try again later." },
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => `${req.ip}:${normalizeUsername(req.body?.username)}`,
+  keyGenerator: (req) => `${ipKeyGenerator(req.ip)}:${normalizeUsername(req.body?.username)}`,
 });
 
 const registerLimiter = rateLimit({
@@ -654,18 +654,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      /*
-       * IMPORTANT:
-       * "from" is never accepted from the browser.
-       * It comes from the authenticated session.
-       *
-       * "ratchetPublicKey" is opaque to the server too —
-       * it's the sender's current DH-ratchet public key,
-       * needed by the recipient to advance their own
-       * ratchet. It is optional: only present on the
-       * first message of a new sending chain.
-       */
-
       const envelope = {
         type: "message",
         from: currentUser,
@@ -682,13 +670,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      /*
-       * Recipient is offline: persist the opaque
-       * {nonce, ciphertext} pair so it survives a
-       * server restart. We look up their id by
-       * username since we only keep ids for
-       * connected clients in memory.
-       */
       try {
         const recipientRow = await pool.query(
           `SELECT id FROM users WHERE username = $1`,
@@ -716,6 +697,39 @@ wss.on("connection", (ws) => {
         );
       } catch (error) {
         console.error("Queueing offline message failed:", error);
+      }
+      return;
+    }
+
+    /* ---------- WEBRTC AUDIO CALL SIGNALING ---------- */
+
+    if (
+      msg.type === "call_offer" ||
+      msg.type === "call_answer" ||
+      msg.type === "ice_candidate" ||
+      msg.type === "call_end"
+    ) {
+      if (!msg.to) return;
+
+      const recipient = clients.get(msg.to);
+
+      if (recipient) {
+        send(recipient.ws, {
+          type: msg.type,
+          from: currentUser,
+          offer: msg.offer || null,
+          answer: msg.answer || null,
+          candidate: msg.candidate || null
+        });
+      } else {
+        // Dërgo sinjal që përdoruesi është offline dhe thirrja s'mund të kryhet
+        if (msg.type === "call_offer") {
+          send(ws, {
+            type: "call_unavailable",
+            to: msg.to,
+            message: "User is offline."
+          });
+        }
       }
     }
   });
@@ -754,11 +768,6 @@ setInterval(async () => {
   }
 }, 60 * 60 * 1000);
 
-/*
- * Drop queued messages nobody has picked up after 30
- * days. This is a storage/hygiene bound, not a security
- * feature — it doesn't add forward secrecy on its own.
- */
 setInterval(async () => {
   try {
     await pool.query(`
@@ -814,4 +823,3 @@ async function shutdown(signal) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
-
