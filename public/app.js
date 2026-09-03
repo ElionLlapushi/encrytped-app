@@ -5,8 +5,23 @@ let authToken = null;
 let ws = null;
 let activeChat = null;
 
+/* =========================
+   WEBRTC STATE
+========================= */
+
+let localStream = null;
+let peerConnection = null;
+let currentCallTarget = null;
+let isCaller = false;
+let pendingIceCandidates = [];
+
+/* =========================
+   APP STATE
+========================= */
+
 const roster = new Map();
 const messageLog = new Map();
+
 const MAX_MESSAGES_PER_CHAT = 100;
 
 /* =========================
@@ -23,81 +38,139 @@ function openSecureDB() {
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+
       if (!db.objectStoreNames.contains(STORE_KEYS)) {
         db.createObjectStore(STORE_KEYS);
       }
     };
 
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(request.error);
+    };
   });
 }
 
 async function setSecureItem(key, value) {
   const db = await openSecureDB();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_KEYS, "readwrite");
     const store = tx.objectStore(STORE_KEYS);
+
     const request = store.put(value, key);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      reject(request.error);
+    };
   });
 }
 
 async function getSecureItem(key) {
   const db = await openSecureDB();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_KEYS, "readonly");
     const store = tx.objectStore(STORE_KEYS);
+
     const request = store.get(key);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(request.error);
+    };
   });
 }
 
 async function removeSecureItem(key) {
   const db = await openSecureDB();
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_KEYS, "readwrite");
     const store = tx.objectStore(STORE_KEYS);
+
     const request = store.delete(key);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
+
+    request.onsuccess = () => {
+      resolve();
+    };
+
+    request.onerror = () => {
+      reject(request.error);
+    };
   });
 }
 
 /* =========================
-   WEBRTC AUDIO CALL STATE
+   DOM HELPER
 ========================= */
-let peerConnection = null;
-let localStream = null;
-let currentCallTarget = null;
-let isCaller = false;
-
-// STUN + TURN (Me fallback për transmetim midis rrjeteve të ndryshme si 4G/Wi-Fi)
-let rtcConfig = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" }
-  ]
-};
-
-async function loadRtcConfig() {
-  try {
-    const data = await apiRequest("/api/turn-credentials", "GET");
-    if (data.iceServers && data.iceServers.length) {
-      rtcConfig = { iceServers: data.iceServers };
-    }
-  } catch (error) {
-    console.error("Could not load TURN config, falling back to STUN only:", error);
-  }
-}
 
 const el = (id) => document.getElementById(id);
 
 /* =========================
-   STORAGE
+   STUN + TURN CONFIG
+========================= */
+
+let rtcConfig = {
+  iceServers: [
+    {
+      urls: "stun:stun.l.google.com:19302"
+    },
+    {
+      urls: "stun:stun1.l.google.com:19302"
+    },
+    {
+      urls: "stun:stun2.l.google.com:19302"
+    }
+  ]
+};
+
+/* =========================
+   LOAD TURN CONFIG
+========================= */
+
+async function loadRtcConfig() {
+  try {
+    const data = await apiRequest(
+      "/api/turn-credentials",
+      "GET"
+    );
+
+    if (
+      data &&
+      Array.isArray(data.iceServers) &&
+      data.iceServers.length > 0
+    ) {
+      rtcConfig = {
+        iceServers: data.iceServers
+      };
+
+      console.log("TURN configuration loaded.");
+    } else {
+      console.warn(
+        "TURN credentials were empty. Using STUN only."
+      );
+    }
+  } catch (error) {
+    console.error(
+      "Could not load TURN config. Falling back to STUN only:",
+      error
+    );
+  }
+}
+
+/* =========================
+   AUTH STORAGE
 ========================= */
 
 function saveAuth() {
@@ -105,7 +178,7 @@ function saveAuth() {
     "sealed_auth",
     JSON.stringify({
       token: authToken,
-      username: myUsername,
+      username: myUsername
     })
   );
 }
@@ -113,12 +186,20 @@ function saveAuth() {
 function loadAuth() {
   try {
     const raw = localStorage.getItem("sealed_auth");
-    if (!raw) return null;
+
+    if (!raw) {
+      return null;
+    }
+
     return JSON.parse(raw);
   } catch {
     return null;
   }
 }
+
+/* =========================
+   PASSWORD KEY DERIVATION
+========================= */
 
 function deriveKeyFromPassword(password, saltBytes) {
   return sodium.crypto_pwhash(
@@ -131,56 +212,116 @@ function deriveKeyFromPassword(password, saltBytes) {
   );
 }
 
+/* =========================
+   SAVE IDENTITY
+========================= */
+
 async function saveIdentity(password) {
-  if (!myKeyPair || !myUsername || !password) return;
+  if (!myKeyPair || !myUsername || !password) {
+    return;
+  }
 
-  const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
-  const derivedKey = deriveKeyFromPassword(password, salt);
-  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
-
-  const encryptedPrivateKey = sodium.crypto_secretbox_easy(
-    myKeyPair.privateKey,
-    nonce,
-    derivedKey
+  const salt = sodium.randombytes_buf(
+    sodium.crypto_pwhash_SALTBYTES
   );
+
+  const derivedKey = deriveKeyFromPassword(
+    password,
+    salt
+  );
+
+  const nonce = sodium.randombytes_buf(
+    sodium.crypto_secretbox_NONCEBYTES
+  );
+
+  const encryptedPrivateKey =
+    sodium.crypto_secretbox_easy(
+      myKeyPair.privateKey,
+      nonce,
+      derivedKey
+    );
 
   const identityData = {
     username: myUsername,
-    publicKey: sodium.to_base64(myKeyPair.publicKey),
+
+    publicKey: sodium.to_base64(
+      myKeyPair.publicKey
+    ),
+
     salt: sodium.to_base64(salt),
+
     nonce: sodium.to_base64(nonce),
-    encryptedPrivateKey: sodium.to_base64(encryptedPrivateKey),
+
+    encryptedPrivateKey:
+      sodium.to_base64(encryptedPrivateKey)
   };
 
-  await setSecureItem("sealed_identity", identityData);
+  await setSecureItem(
+    "sealed_identity",
+    identityData
+  );
 }
+
+/* =========================
+   LOAD IDENTITY
+========================= */
 
 async function loadRawIdentity() {
   try {
-    const data = await getSecureItem("sealed_identity");
+    const data = await getSecureItem(
+      "sealed_identity"
+    );
+
     return data || null;
   } catch (error) {
-    console.error("Error loading identity from IndexedDB:", error);
+    console.error(
+      "Error loading identity from IndexedDB:",
+      error
+    );
+
     return null;
   }
 }
 
-function decryptIdentity(password, stored) {
-  const salt = sodium.from_base64(stored.salt);
-  const derivedKey = deriveKeyFromPassword(password, salt);
-  const nonce = sodium.from_base64(stored.nonce);
-  const encryptedPrivateKey = sodium.from_base64(stored.encryptedPrivateKey);
+/* =========================
+   DECRYPT IDENTITY
+========================= */
 
-  const privateKey = sodium.crypto_secretbox_open_easy(
-    encryptedPrivateKey,
-    nonce,
-    derivedKey
+function decryptIdentity(password, stored) {
+  const salt = sodium.from_base64(
+    stored.salt
   );
+
+  const derivedKey =
+    deriveKeyFromPassword(
+      password,
+      salt
+    );
+
+  const nonce = sodium.from_base64(
+    stored.nonce
+  );
+
+  const encryptedPrivateKey =
+    sodium.from_base64(
+      stored.encryptedPrivateKey
+    );
+
+  const privateKey =
+    sodium.crypto_secretbox_open_easy(
+      encryptedPrivateKey,
+      nonce,
+      derivedKey
+    );
 
   return {
     username: stored.username,
-    publicKey: sodium.from_base64(stored.publicKey),
-    privateKey,
+
+    publicKey: sodium.from_base64(
+      stored.publicKey
+    ),
+
+    privateKey
   };
 }
 
@@ -190,14 +331,22 @@ function decryptIdentity(password, stored) {
 
 function showAuthError(message) {
   const box = el("auth-error");
-  if (!box) return;
+
+  if (!box) {
+    return;
+  }
+
   box.textContent = message;
   box.hidden = false;
 }
 
 function clearAuthError() {
   const box = el("auth-error");
-  if (!box) return;
+
+  if (!box) {
+    return;
+  }
+
   box.textContent = "";
   box.hidden = true;
 }
@@ -207,52 +356,112 @@ function setLoading(loading) {
   const registerBtn = el("register-btn");
   const status = el("key-status");
 
-  if (loginBtn) loginBtn.disabled = loading;
-  if (registerBtn) registerBtn.disabled = loading;
-  if (status) status.hidden = !loading;
+  if (loginBtn) {
+    loginBtn.disabled = loading;
+  }
+
+  if (registerBtn) {
+    registerBtn.disabled = loading;
+  }
+
+  if (status) {
+    status.hidden = !loading;
+  }
 }
 
 function showChatScreen() {
-  el("login-screen").hidden = true;
-  el("chat-screen").hidden = false;
-  el("me-name").textContent = myUsername;
+  const loginScreen = el("login-screen");
+  const chatScreen = el("chat-screen");
+
+  if (loginScreen) {
+    loginScreen.hidden = true;
+  }
+
+  if (chatScreen) {
+    chatScreen.hidden = false;
+  }
+
+  const meName = el("me-name");
+
+  if (meName) {
+    meName.textContent = myUsername;
+  }
 
   if (myKeyPair) {
     renderFingerprint(
-      sodium.to_base64(myKeyPair.publicKey),
+      sodium.to_base64(
+        myKeyPair.publicKey
+      ),
       el("me-fingerprint")
     );
   }
 }
 
 function showLoginScreen() {
-  el("login-screen").hidden = false;
-  el("chat-screen").hidden = true;
+  const loginScreen = el("login-screen");
+  const chatScreen = el("chat-screen");
+
+  if (loginScreen) {
+    loginScreen.hidden = false;
+  }
+
+  if (chatScreen) {
+    chatScreen.hidden = true;
+  }
 }
 
 /* =========================
    FINGERPRINT
 ========================= */
 
-function renderFingerprint(publicKeyBase64, container, blockCount = 6) {
-  if (!container || !publicKeyBase64) return;
+function renderFingerprint(
+  publicKeyBase64,
+  container,
+  blockCount = 6
+) {
+  if (!container || !publicKeyBase64) {
+    return;
+  }
+
   container.innerHTML = "";
 
   try {
-    const hash = sodium.crypto_generichash(
-      16,
-      sodium.from_base64(publicKeyBase64)
-    );
+    const hash =
+      sodium.crypto_generichash(
+        16,
+        sodium.from_base64(
+          publicKeyBase64
+        )
+      );
 
-    for (let i = 0; i < blockCount; i++) {
-      const hue = hash[i * 2] * (360 / 255);
-      const light = 45 + (hash[i * 2 + 1] % 20);
-      const block = document.createElement("span");
-      block.style.background = `hsl(${hue.toFixed(0)}, 65%, ${light}%)`;
+    for (
+      let i = 0;
+      i < blockCount;
+      i++
+    ) {
+      const hue =
+        hash[i * 2] *
+        (360 / 255);
+
+      const light =
+        45 +
+        (hash[i * 2 + 1] % 20);
+
+      const block =
+        document.createElement(
+          "span"
+        );
+
+      block.style.background =
+        `hsl(${hue.toFixed(0)}, 65%, ${light}%)`;
+
       container.appendChild(block);
     }
   } catch (error) {
-    console.error("Fingerprint error:", error);
+    console.error(
+      "Fingerprint error:",
+      error
+    );
   }
 }
 
@@ -261,46 +470,80 @@ function renderFingerprint(publicKeyBase64, container, blockCount = 6) {
 ========================= */
 
 function sodiumReady() {
-  return new Promise((resolve, reject) => {
-    let attempts = 0;
-    const check = () => {
-      attempts++;
-      if (window.sodium && window.sodium.ready) {
-        window.sodium.ready
-          .then(() => {
-            sodium = window.sodium;
-            resolve();
-          })
-          .catch(reject);
-        return;
-      }
-      if (attempts > 300) {
-        reject(new Error("libsodium failed to load."));
-        return;
-      }
-      setTimeout(check, 50);
-    };
-    check();
-  });
+  return new Promise(
+    (resolve, reject) => {
+      let attempts = 0;
+
+      const check = () => {
+        attempts++;
+
+        if (
+          window.sodium &&
+          window.sodium.ready
+        ) {
+          window.sodium.ready
+            .then(() => {
+              sodium = window.sodium;
+              resolve();
+            })
+            .catch(reject);
+
+          return;
+        }
+
+        if (attempts > 300) {
+          reject(
+            new Error(
+              "libsodium failed to load."
+            )
+          );
+
+          return;
+        }
+
+        setTimeout(
+          check,
+          50
+        );
+      };
+
+      check();
+    }
+  );
 }
 
 /* =========================
    API
 ========================= */
 
-async function apiRequest(url, method, body) {
-  const headers = { "Content-Type": "application/json" };
+async function apiRequest(
+  url,
+  method,
+  body
+) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
   if (authToken) {
-    headers.Authorization = `Bearer ${authToken}`;
+    headers.Authorization =
+      `Bearer ${authToken}`;
   }
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const response = await fetch(
+    url,
+    {
+      method,
+      headers,
+      body:
+        body !== undefined
+          ? JSON.stringify(body)
+          : undefined
+    }
+  );
 
   let data = {};
+
   try {
     data = await response.json();
   } catch {
@@ -308,7 +551,10 @@ async function apiRequest(url, method, body) {
   }
 
   if (!response.ok) {
-    throw new Error(data.error || `Request failed (${response.status})`);
+    throw new Error(
+      data.error ||
+      `Request failed (${response.status})`
+    );
   }
 
   return data;
@@ -320,198 +566,488 @@ async function apiRequest(url, method, body) {
 
 function ensureKeyPair() {
   if (!myKeyPair) {
-    myKeyPair = sodium.crypto_box_keypair();
+    myKeyPair =
+      sodium.crypto_box_keypair();
   }
 }
 
 /* =========================
-   FORWARD SECRECY (Double Ratchet System)
+   DOUBLE RATCHET
 ========================= */
 
 function concatBytes(...arrays) {
-  const total = arrays.reduce((sum, a) => sum + a.length, 0);
-  const out = new Uint8Array(total);
+  const total =
+    arrays.reduce(
+      (sum, a) =>
+        sum + a.length,
+      0
+    );
+
+  const out =
+    new Uint8Array(total);
+
   let offset = 0;
+
   for (const a of arrays) {
-    out.set(a, offset);
+    out.set(
+      a,
+      offset
+    );
+
     offset += a.length;
   }
+
   return out;
 }
 
-function kdfRootChain(rootKey, dhOutput) {
-  const material = sodium.crypto_generichash(
-    64,
-    concatBytes(rootKey, dhOutput)
-  );
+function kdfRootChain(
+  rootKey,
+  dhOutput
+) {
+  const material =
+    sodium.crypto_generichash(
+      64,
+      concatBytes(
+        rootKey,
+        dhOutput
+      )
+    );
 
   return {
-    newRootKey: material.slice(0, 32),
-    chainKey: material.slice(32, 64)
+    newRootKey:
+      material.slice(0, 32),
+
+    chainKey:
+      material.slice(32, 64)
   };
 }
 
-function kdfChainStep(chainKey) {
-  const messageKey = sodium.crypto_generichash(
-    32,
-    concatBytes(chainKey, new Uint8Array([0x01]))
-  );
+function kdfChainStep(
+  chainKey
+) {
+  const messageKey =
+    sodium.crypto_generichash(
+      32,
+      concatBytes(
+        chainKey,
+        new Uint8Array([0x01])
+      )
+    );
 
-  const nextChainKey = sodium.crypto_generichash(
-    32,
-    concatBytes(chainKey, new Uint8Array([0x02]))
-  );
+  const nextChainKey =
+    sodium.crypto_generichash(
+      32,
+      concatBytes(
+        chainKey,
+        new Uint8Array([0x02])
+      )
+    );
 
-  return { messageKey, nextChainKey };
+  return {
+    messageKey,
+    nextChainKey
+  };
 }
 
-function ratchetStorageKey(contactUsername) {
+function ratchetStorageKey(
+  contactUsername
+) {
   return `sealed_ratchet_${myUsername}_${contactUsername}`;
 }
 
-async function loadRatchetState(contactUsername) {
+async function loadRatchetState(
+  contactUsername
+) {
   try {
-    const raw = await getSecureItem(ratchetStorageKey(contactUsername));
-    if (!raw) return null;
+    const raw =
+      await getSecureItem(
+        ratchetStorageKey(
+          contactUsername
+        )
+      );
+
+    if (!raw) {
+      return null;
+    }
 
     return {
-      rootKey: sodium.from_base64(raw.rootKey),
-      ratchetPrivateKey: raw.ratchetPrivateKey ? sodium.from_base64(raw.ratchetPrivateKey) : null,
-      ratchetPublicKey: raw.ratchetPublicKey ? sodium.from_base64(raw.ratchetPublicKey) : null,
-      remoteRatchetPublicKey: raw.remoteRatchetPublicKey ? sodium.from_base64(raw.remoteRatchetPublicKey) : null,
-      sendChainKey: raw.sendChainKey ? sodium.from_base64(raw.sendChainKey) : null,
-      recvChainKey: raw.recvChainKey ? sodium.from_base64(raw.recvChainKey) : null,
-      needsSendRatchet: !!raw.needsSendRatchet
+      rootKey:
+        sodium.from_base64(
+          raw.rootKey
+        ),
+
+      ratchetPrivateKey:
+        raw.ratchetPrivateKey
+          ? sodium.from_base64(
+              raw.ratchetPrivateKey
+            )
+          : null,
+
+      ratchetPublicKey:
+        raw.ratchetPublicKey
+          ? sodium.from_base64(
+              raw.ratchetPublicKey
+            )
+          : null,
+
+      remoteRatchetPublicKey:
+        raw.remoteRatchetPublicKey
+          ? sodium.from_base64(
+              raw.remoteRatchetPublicKey
+            )
+          : null,
+
+      sendChainKey:
+        raw.sendChainKey
+          ? sodium.from_base64(
+              raw.sendChainKey
+            )
+          : null,
+
+      recvChainKey:
+        raw.recvChainKey
+          ? sodium.from_base64(
+              raw.recvChainKey
+            )
+          : null,
+
+      needsSendRatchet:
+        !!raw.needsSendRatchet
     };
   } catch (error) {
-    console.error("Ratchet state load error:", error);
+    console.error(
+      "Ratchet state load error:",
+      error
+    );
+
     return null;
   }
 }
 
-async function saveRatchetState(contactUsername, state) {
+async function saveRatchetState(
+  contactUsername,
+  state
+) {
   await setSecureItem(
-    ratchetStorageKey(contactUsername),
+    ratchetStorageKey(
+      contactUsername
+    ),
     {
-      rootKey: sodium.to_base64(state.rootKey),
-      ratchetPrivateKey: state.ratchetPrivateKey ? sodium.to_base64(state.ratchetPrivateKey) : null,
-      ratchetPublicKey: state.ratchetPublicKey ? sodium.to_base64(state.ratchetPublicKey) : null,
-      remoteRatchetPublicKey: state.remoteRatchetPublicKey ? sodium.to_base64(state.remoteRatchetPublicKey) : null,
-      sendChainKey: state.sendChainKey ? sodium.to_base64(state.sendChainKey) : null,
-      recvChainKey: state.recvChainKey ? sodium.to_base64(state.recvChainKey) : null,
-      needsSendRatchet: state.needsSendRatchet
+      rootKey:
+        sodium.to_base64(
+          state.rootKey
+        ),
+
+      ratchetPrivateKey:
+        state.ratchetPrivateKey
+          ? sodium.to_base64(
+              state.ratchetPrivateKey
+            )
+          : null,
+
+      ratchetPublicKey:
+        state.ratchetPublicKey
+          ? sodium.to_base64(
+              state.ratchetPublicKey
+            )
+          : null,
+
+      remoteRatchetPublicKey:
+        state.remoteRatchetPublicKey
+          ? sodium.to_base64(
+              state.remoteRatchetPublicKey
+            )
+          : null,
+
+      sendChainKey:
+        state.sendChainKey
+          ? sodium.to_base64(
+              state.sendChainKey
+            )
+          : null,
+
+      recvChainKey:
+        state.recvChainKey
+          ? sodium.to_base64(
+              state.recvChainKey
+            )
+          : null,
+
+      needsSendRatchet:
+        state.needsSendRatchet
     }
   );
 }
 
-function initRatchetState(theirIdentityPublicKeyB64) {
-  const dh0 = sodium.crypto_scalarmult(
-    myKeyPair.privateKey,
-    sodium.from_base64(theirIdentityPublicKeyB64)
-  );
+function initRatchetState(
+  theirIdentityPublicKeyB64
+) {
+  const dh =
+    sodium.crypto_scalarmult(
+      myKeyPair.privateKey,
+      sodium.from_base64(
+        theirIdentityPublicKeyB64
+      )
+    );
 
-  const rootKey = sodium.crypto_generichash(32, dh0);
+  const rootKey =
+    sodium.crypto_generichash(
+      32,
+      dh
+    );
 
   return {
     rootKey,
+
     ratchetPrivateKey: null,
     ratchetPublicKey: null,
     remoteRatchetPublicKey: null,
+
     sendChainKey: null,
     recvChainKey: null,
+
     needsSendRatchet: false
   };
 }
 
-async function getSendingMessageKey(contactUsername, theirIdentityPublicKeyB64) {
-  let state = await loadRatchetState(contactUsername);
+async function getSendingMessageKey(
+  contactUsername,
+  theirIdentityPublicKeyB64
+) {
+  let state =
+    await loadRatchetState(
+      contactUsername
+    );
+
   if (!state) {
-    state = initRatchetState(theirIdentityPublicKeyB64);
+    state =
+      initRatchetState(
+        theirIdentityPublicKeyB64
+      );
   }
 
-  if (!state.sendChainKey || state.needsSendRatchet) {
-    const freshKeyPair = sodium.crypto_box_keypair();
-    const dhPartnerPublicKey = state.remoteRatchetPublicKey || sodium.from_base64(theirIdentityPublicKeyB64);
+  if (
+    !state.sendChainKey ||
+    state.needsSendRatchet
+  ) {
+    const freshKeyPair =
+      sodium.crypto_box_keypair();
 
-    const dh = sodium.crypto_scalarmult(freshKeyPair.privateKey, dhPartnerPublicKey);
-    const { newRootKey, chainKey } = kdfRootChain(state.rootKey, dh);
+    const dhPartnerPublicKey =
+      state.remoteRatchetPublicKey ||
+      sodium.from_base64(
+        theirIdentityPublicKeyB64
+      );
 
-    state.rootKey = newRootKey;
-    state.ratchetPrivateKey = freshKeyPair.privateKey;
-    state.ratchetPublicKey = freshKeyPair.publicKey;
-    state.sendChainKey = chainKey;
-    state.needsSendRatchet = false;
+    const dh =
+      sodium.crypto_scalarmult(
+        freshKeyPair.privateKey,
+        dhPartnerPublicKey
+      );
+
+    const {
+      newRootKey,
+      chainKey
+    } =
+      kdfRootChain(
+        state.rootKey,
+        dh
+      );
+
+    state.rootKey =
+      newRootKey;
+
+    state.ratchetPrivateKey =
+      freshKeyPair.privateKey;
+
+    state.ratchetPublicKey =
+      freshKeyPair.publicKey;
+
+    state.sendChainKey =
+      chainKey;
+
+    state.needsSendRatchet =
+      false;
   }
 
-  const { messageKey, nextChainKey } = kdfChainStep(state.sendChainKey);
-  state.sendChainKey = nextChainKey;
+  const {
+    messageKey,
+    nextChainKey
+  } =
+    kdfChainStep(
+      state.sendChainKey
+    );
 
-  await saveRatchetState(contactUsername, state);
+  state.sendChainKey =
+    nextChainKey;
+
+  await saveRatchetState(
+    contactUsername,
+    state
+  );
 
   return {
     messageKey,
-    ratchetPublicKeyB64: sodium.to_base64(state.ratchetPublicKey)
+
+    ratchetPublicKeyB64:
+      sodium.to_base64(
+        state.ratchetPublicKey
+      )
   };
 }
 
-async function getReceivingMessageKey(contactUsername, theirIdentityPublicKeyB64, senderRatchetPublicKeyB64) {
-  let state = await loadRatchetState(contactUsername);
+async function getReceivingMessageKey(
+  contactUsername,
+  theirIdentityPublicKeyB64,
+  senderRatchetPublicKeyB64
+) {
+  let state =
+    await loadRatchetState(
+      contactUsername
+    );
+
   if (!state) {
-    state = initRatchetState(theirIdentityPublicKeyB64);
+    state =
+      initRatchetState(
+        theirIdentityPublicKeyB64
+      );
   }
 
   if (senderRatchetPublicKeyB64) {
-    const currentB64 = state.remoteRatchetPublicKey ? sodium.to_base64(state.remoteRatchetPublicKey) : null;
+    const currentB64 =
+      state.remoteRatchetPublicKey
+        ? sodium.to_base64(
+            state.remoteRatchetPublicKey
+          )
+        : null;
 
-    if (currentB64 !== senderRatchetPublicKeyB64) {
-      const senderRatchetPublicKey = sodium.from_base64(senderRatchetPublicKeyB64);
-      const myDhPrivateKey = state.ratchetPrivateKey || myKeyPair.privateKey;
+    if (
+      currentB64 !==
+      senderRatchetPublicKeyB64
+    ) {
+      const senderRatchetPublicKey =
+        sodium.from_base64(
+          senderRatchetPublicKeyB64
+        );
 
-      const dh = sodium.crypto_scalarmult(myDhPrivateKey, senderRatchetPublicKey);
-      const { newRootKey, chainKey } = kdfRootChain(state.rootKey, dh);
+      const myDhPrivateKey =
+        state.ratchetPrivateKey ||
+        myKeyPair.privateKey;
 
-      state.rootKey = newRootKey;
-      state.recvChainKey = chainKey;
-      state.remoteRatchetPublicKey = senderRatchetPublicKey;
-      state.needsSendRatchet = true;
+      const dh =
+        sodium.crypto_scalarmult(
+          myDhPrivateKey,
+          senderRatchetPublicKey
+        );
+
+      const {
+        newRootKey,
+        chainKey
+      } =
+        kdfRootChain(
+          state.rootKey,
+          dh
+        );
+
+      state.rootKey =
+        newRootKey;
+
+      state.recvChainKey =
+        chainKey;
+
+      state.remoteRatchetPublicKey =
+        senderRatchetPublicKey;
+
+      state.needsSendRatchet =
+        true;
     }
   }
 
   if (!state.recvChainKey) {
-    const senderRatchetPublicKey = sodium.from_base64(senderRatchetPublicKeyB64);
-    const dh = sodium.crypto_scalarmult(myKeyPair.privateKey, senderRatchetPublicKey);
-    const { newRootKey, chainKey } = kdfRootChain(state.rootKey, dh);
+    if (!senderRatchetPublicKeyB64) {
+      throw new Error(
+        "Missing sender ratchet public key."
+      );
+    }
 
-    state.rootKey = newRootKey;
-    state.recvChainKey = chainKey;
-    state.remoteRatchetPublicKey = senderRatchetPublicKey;
-    state.needsSendRatchet = true;
+    const senderRatchetPublicKey =
+      sodium.from_base64(
+        senderRatchetPublicKeyB64
+      );
+
+    const dh =
+      sodium.crypto_scalarmult(
+        myKeyPair.privateKey,
+        senderRatchetPublicKey
+      );
+
+    const {
+      newRootKey,
+      chainKey
+    } =
+      kdfRootChain(
+        state.rootKey,
+        dh
+      );
+
+    state.rootKey =
+      newRootKey;
+
+    state.recvChainKey =
+      chainKey;
+
+    state.remoteRatchetPublicKey =
+      senderRatchetPublicKey;
+
+    state.needsSendRatchet =
+      true;
   }
 
-  const { messageKey, nextChainKey } = kdfChainStep(state.recvChainKey);
-  state.recvChainKey = nextChainKey;
+  const {
+    messageKey,
+    nextChainKey
+  } =
+    kdfChainStep(
+      state.recvChainKey
+    );
 
-  await saveRatchetState(contactUsername, state);
+  state.recvChainKey =
+    nextChainKey;
+
+  await saveRatchetState(
+    contactUsername,
+    state
+  );
+
   return messageKey;
 }
 
 /* =========================
-   REGISTER & LOGIN
+   REGISTER
 ========================= */
 
 async function register() {
   clearAuthError();
 
-  const username = el("username").value.trim();
-  const password = el("password").value;
+  const username =
+    el("username").value.trim();
+
+  const password =
+    el("password").value;
 
   if (!username) {
-    showAuthError("Please enter a username.");
+    showAuthError(
+      "Please enter a username."
+    );
+
     return;
   }
 
   if (password.length < 8) {
-    showAuthError("Password must contain at least 8 characters.");
+    showAuthError(
+      "Password must contain at least 8 characters."
+    );
+
     return;
   }
 
@@ -519,70 +1055,149 @@ async function register() {
 
   try {
     ensureKeyPair();
-    const publicKey = sodium.to_base64(myKeyPair.publicKey);
 
-    const result = await apiRequest("/api/register", "POST", {
-      username,
-      password,
-      publicKey,
-    });
+    const publicKey =
+      sodium.to_base64(
+        myKeyPair.publicKey
+      );
 
-    authToken = result.token;
-    myUsername = result.user.username;
+    const result =
+      await apiRequest(
+        "/api/register",
+        "POST",
+        {
+          username,
+          password,
+          publicKey
+        }
+      );
+
+    authToken =
+      result.token;
+
+    myUsername =
+      result.user.username;
 
     saveAuth();
-    await saveIdentity(password);
+
+    await saveIdentity(
+      password
+    );
+
     connectWebSocket();
   } catch (error) {
-    console.error("Registration error:", error);
-    showAuthError(error.message);
+    console.error(
+      "Registration error:",
+      error
+    );
+
+    showAuthError(
+      error.message
+    );
+
     setLoading(false);
   }
 }
 
+/* =========================
+   LOGIN
+========================= */
+
 async function login() {
   clearAuthError();
 
-  const username = el("username").value.trim();
-  const password = el("password").value;
+  const username =
+    el("username").value.trim();
+
+  const password =
+    el("password").value;
 
   if (!username || !password) {
-    showAuthError("Username and password are required.");
+    showAuthError(
+      "Username and password are required."
+    );
+
     return;
   }
 
   setLoading(true);
 
   try {
-    const result = await apiRequest("/api/login", "POST", { username, password });
+    const result =
+      await apiRequest(
+        "/api/login",
+        "POST",
+        {
+          username,
+          password
+        }
+      );
 
-    authToken = result.token;
-    myUsername = result.user.username;
+    authToken =
+      result.token;
 
-    const stored = await loadRawIdentity();
-    if (stored && stored.username === myUsername) {
+    myUsername =
+      result.user.username;
+
+    const stored =
+      await loadRawIdentity();
+
+    if (
+      stored &&
+      stored.username === myUsername
+    ) {
       try {
-        myKeyPair = decryptIdentity(password, stored);
+        myKeyPair =
+          decryptIdentity(
+            password,
+            stored
+          );
       } catch (error) {
-        console.error("Identity decrypt error:", error);
-        showAuthError("This password does not match the encrypted key stored in this browser.");
+        console.error(
+          "Identity decrypt error:",
+          error
+        );
+
+        showAuthError(
+          "This password does not match the encrypted key stored in this browser."
+        );
+
         setLoading(false);
+
         return;
       }
     } else {
       ensureKeyPair();
-      await saveIdentity(password);
+
+      await saveIdentity(
+        password
+      );
     }
 
     saveAuth();
-    await apiRequest("/api/me/public-key", "PUT", {
-      publicKey: sodium.to_base64(myKeyPair.publicKey),
-    });
+
+    await apiRequest(
+      "/api/me/public-key",
+      "PUT",
+      {
+        publicKey:
+          sodium.to_base64(
+            myKeyPair.publicKey
+          )
+      }
+    );
 
     connectWebSocket();
   } catch (error) {
-    console.error("Login error:", error);
-    showAuthError(error.message);
+    console.error(
+      "Login error:",
+      error
+    );
+
+    showAuthError(
+      error.message
+    );
+
     setLoading(false);
   }
 }
@@ -593,487 +1208,1767 @@ async function login() {
 
 function connectWebSocket() {
   if (!authToken) {
-    showAuthError("Authentication token is missing.");
+    showAuthError(
+      "Authentication token is missing."
+    );
+
     setLoading(false);
+
     return;
   }
 
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+  if (
+    ws &&
+    (
+      ws.readyState ===
+      WebSocket.OPEN ||
+      ws.readyState ===
+      WebSocket.CONNECTING
+    )
+  ) {
     return;
   }
 
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${protocol}//${location.host}`);
+  const protocol =
+    location.protocol === "https:"
+      ? "wss:"
+      : "ws:";
 
-  ws.addEventListener("open", () => {
-    console.log("WebSocket connected.");
-    ws.send(JSON.stringify({ type: "authenticate", token: authToken }));
-  });
+  ws =
+    new WebSocket(
+      `${protocol}//${location.host}`
+    );
 
-  ws.addEventListener("message", (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      handleServerMessage(msg);
-    } catch (error) {
-      console.error("WebSocket message error:", error);
+  ws.addEventListener(
+    "open",
+    () => {
+      console.log(
+        "WebSocket connected."
+      );
+
+      ws.send(
+        JSON.stringify({
+          type: "authenticate",
+          token: authToken
+        })
+      );
     }
-  });
+  );
 
-  ws.addEventListener("error", (error) => {
-    console.error("WebSocket error:", error);
-  });
+  ws.addEventListener(
+    "message",
+    (event) => {
+      try {
+        const msg =
+          JSON.parse(
+            event.data
+          );
 
-  ws.addEventListener("close", () => {
-    console.log("WebSocket disconnected.");
-    cleanUpCall(); 
-    if (el("chat-screen").hidden === false) {
-      addSystemNote(activeChat, "Disconnected from server. Refresh to reconnect.");
+        handleServerMessage(
+          msg
+        );
+      } catch (error) {
+        console.error(
+          "WebSocket message error:",
+          error
+        );
+      }
     }
-  });
+  );
+
+  ws.addEventListener(
+    "error",
+    (error) => {
+      console.error(
+        "WebSocket error:",
+        error
+      );
+    }
+  );
+
+  ws.addEventListener(
+    "close",
+    () => {
+      console.log(
+        "WebSocket disconnected."
+      );
+
+      cleanUpCall();
+
+      const chatScreen =
+        el("chat-screen");
+
+      if (
+        chatScreen &&
+        chatScreen.hidden === false
+      ) {
+        addSystemNote(
+          activeChat,
+          "Disconnected from server. Refresh to reconnect."
+        );
+      }
+    }
+  );
 }
 
 /* =========================
-   SERVER MESSAGES & WEBRTC HANDLERS
+   SERVER MESSAGES
 ========================= */
 
 async function handleServerMessage(msg) {
   switch (msg.type) {
+
+    /* =====================
+       AUTHENTICATED
+    ===================== */
+
     case "authenticated":
-      myUsername = msg.username;
+      myUsername =
+        msg.username;
+
       saveAuth();
+
       await loadRtcConfig();
+
       setLoading(false);
+
       showChatScreen();
+
       break;
+
+    /* =====================
+       AUTH ERROR
+    ===================== */
 
     case "auth_error":
       setLoading(false);
+
       showLoginScreen();
-      showAuthError(msg.message || "Authentication failed.");
-      if (msg.message && msg.message.toLowerCase().includes("expired")) {
-        localStorage.removeItem("sealed_auth");
+
+      showAuthError(
+        msg.message ||
+        "Authentication failed."
+      );
+
+      if (
+        msg.message &&
+        msg.message
+          .toLowerCase()
+          .includes("expired")
+      ) {
+        localStorage.removeItem(
+          "sealed_auth"
+        );
       }
+
       break;
+
+    /* =====================
+       ERROR
+    ===================== */
 
     case "error":
       setLoading(false);
-      showAuthError(msg.message || "An error occurred.");
+
+      showAuthError(
+        msg.message ||
+        "An error occurred."
+      );
+
       break;
+
+    /* =====================
+       USER LIST
+    ===================== */
 
     case "user_list":
       roster.clear();
-      for (const user of msg.users || []) {
-        if (user.username !== myUsername) {
-          roster.set(user.username, user.publicKey);
+
+      for (
+        const user of
+        msg.users || []
+      ) {
+        if (
+          user.username !==
+          myUsername
+        ) {
+          roster.set(
+            user.username,
+            user.publicKey
+          );
         }
       }
+
       renderRoster();
+
       break;
 
-    case "message": {
-      const plaintext = await decryptFrom(msg.from, msg.nonce, msg.ciphertext, msg.ratchetPublicKey);
+    /* =====================
+       MESSAGE
+    ===================== */
 
-      if (plaintext === null) {
-        addSystemNote(msg.from, "Could not verify or decrypt this message.");
+    case "message": {
+      const plaintext =
+        await decryptFrom(
+          msg.from,
+          msg.nonce,
+          msg.ciphertext,
+          msg.ratchetPublicKey
+        );
+
+      if (
+        plaintext === null
+      ) {
+        addSystemNote(
+          msg.from,
+          "Could not verify or decrypt this message."
+        );
+
         return;
       }
 
-      appendMessage(msg.from, {
-        mine: false,
-        text: plaintext,
-        ts: msg.timestamp || Date.Now(),
-      });
+      appendMessage(
+        msg.from,
+        {
+          mine: false,
+          text: plaintext,
+          ts:
+            msg.timestamp ||
+            Date.now()
+        }
+      );
 
-      if (activeChat === msg.from) {
-        renderMessages(msg.from);
+      if (
+        activeChat ===
+        msg.from
+      ) {
+        renderMessages(
+          msg.from
+        );
       }
+
       break;
     }
 
-    /* WEBRTC AUDIO CALL SIGNALS */
+    /* =====================
+       WEBRTC CALL OFFER
+    ===================== */
+
     case "call_offer":
-      handleCallOffer(msg.from, msg.offer);
+      await handleCallOffer(
+        msg.from,
+        msg.offer
+      );
+
       break;
+
+    /* =====================
+       WEBRTC CALL ANSWER
+    ===================== */
 
     case "call_answer":
-      if (peerConnection && msg.from === currentCallTarget) {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.answer));
-        el("call-status").textContent = "Connected";
-      }
-      break;
 
-    case "ice_candidate":
-      if (peerConnection && msg.from === currentCallTarget && msg.candidate) {
+      if (
+        peerConnection &&
+        msg.from === currentCallTarget &&
+        msg.answer
+      ) {
         try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(msg.candidate));
-        } catch (e) {
-          console.error("Error adding ICE candidate", e);
+          await peerConnection.setRemoteDescription(
+            new RTCSessionDescription(
+              msg.answer
+            )
+          );
+
+          console.log(
+            "Remote answer description set."
+          );
+
+          await flushPendingIceCandidates();
+
+          const callStatus =
+            el("call-status");
+
+          if (callStatus) {
+            callStatus.textContent =
+              "Connected";
+          }
+
+          const remoteAudio =
+            el("remote-audio");
+
+          if (remoteAudio) {
+            try {
+              await remoteAudio.play();
+            } catch (error) {
+              console.warn(
+                "Remote audio playback blocked:",
+                error
+              );
+            }
+          }
+        } catch (error) {
+          console.error(
+            "Error setting remote answer:",
+            error
+          );
+
+          const callStatus =
+            el("call-status");
+
+          if (callStatus) {
+            callStatus.textContent =
+              "Connection failed";
+          }
         }
       }
+
       break;
+
+    /* =====================
+       WEBRTC ICE CANDIDATE
+    ===================== */
+
+    case "ice_candidate":
+
+      if (
+        msg.from === currentCallTarget &&
+        msg.candidate
+      ) {
+        await addRemoteIceCandidate(
+          msg.candidate
+        );
+      }
+
+      break;
+
+    /* =====================
+       CALL END
+    ===================== */
 
     case "call_end":
-      if (msg.from === currentCallTarget) {
+
+      if (
+        msg.from ===
+        currentCallTarget
+      ) {
         cleanUpCall();
-        alert(`${msg.from} ended the call.`);
+
+        alert(
+          `${msg.from} ended the call.`
+        );
       }
+
       break;
 
+    /* =====================
+       CALL UNAVAILABLE
+    ===================== */
+
     case "call_unavailable":
+
       cleanUpCall();
-      alert(`User ${msg.to} is offline or unavailable.`);
+
+      alert(
+        `User ${msg.to} is offline or unavailable.`
+      );
+
       break;
 
     default:
-      console.log("Unknown server message:", msg);
+
+      console.log(
+        "Unknown server message:",
+        msg
+      );
+
       break;
   }
 }
 
 /* =========================
-   WEBRTC AUDIO LOGIC
+   WEBRTC MICROPHONE
 ========================= */
 
 async function setupLocalAudio() {
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    if (
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      throw new Error(
+        "getUserMedia is not supported by this browser."
+      );
+    }
+
+    localStream =
+      await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+
+    console.log(
+      "Microphone access granted."
+    );
+
     return true;
-  } catch (err) {
-    console.error("Microphone permission denied:", err);
-    alert("Microphone access is required to place/receive calls.");
+  } catch (error) {
+    console.error(
+      "Microphone permission denied:",
+      error
+    );
+
+    alert(
+      "Microphone access is required to place or receive calls. Please allow microphone access for this website."
+    );
+
     return false;
   }
 }
 
-function createPeerConnection(targetUser) {
-  peerConnection = new RTCPeerConnection(rtcConfig);
+/* =========================
+   CREATE PEER CONNECTION
+========================= */
+
+function createPeerConnection(
+  targetUser
+) {
+  console.log(
+    "Creating PeerConnection for:",
+    targetUser
+  );
+
+  console.log(
+    "Using ICE configuration:",
+    rtcConfig
+  );
+
+  peerConnection =
+    new RTCPeerConnection(
+      rtcConfig
+    );
+
+  /* =====================
+     LOCAL AUDIO
+  ===================== */
 
   if (localStream) {
-    localStream.getTracks().forEach((track) => {
-      peerConnection.addTrack(track, localStream);
-    });
+    localStream
+      .getTracks()
+      .forEach((track) => {
+        console.log(
+          "Adding local audio track:",
+          track.kind
+        );
+
+        peerConnection.addTrack(
+          track,
+          localStream
+        );
+      });
   }
 
-  peerConnection.ontrack = (event) => {
-    const remoteAudio = el("remote-audio");
-    if (remoteAudio && event.streams[0]) {
-      remoteAudio.srcObject = event.streams[0];
-      remoteAudio.play().catch((err) => {
-        console.error("Autoplay Error:", err);
-      });
-    }
-  };
+  /* =====================
+     REMOTE AUDIO
+  ===================== */
 
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate && ws) {
-      ws.send(JSON.stringify({
-        type: "ice_candidate",
-        to: targetUser,
-        candidate: event.candidate
-      }));
-    }
-  };
+  peerConnection.ontrack =
+    async (event) => {
+      console.log(
+        "Remote audio track received."
+      );
 
-  peerConnection.oniceconnectionstatechange = () => {
-    if (peerConnection) {
-      if (peerConnection.iceConnectionState === "disconnected" || peerConnection.iceConnectionState === "failed") {
-        cleanUpCall();
+      const remoteAudio =
+        el("remote-audio");
+
+      if (
+        !remoteAudio ||
+        !event.streams ||
+        !event.streams[0]
+      ) {
+        console.error(
+          "Remote audio element or stream not found."
+        );
+
+        return;
       }
-    }
-  };
+
+      remoteAudio.srcObject =
+        event.streams[0];
+
+      try {
+        await remoteAudio.play();
+
+        console.log(
+          "Remote audio playback started."
+        );
+      } catch (error) {
+        console.warn(
+          "Remote audio autoplay was blocked:",
+          error
+        );
+      }
+    };
+
+  /* =====================
+     ICE CANDIDATES
+  ===================== */
+
+  peerConnection.onicecandidate =
+    (event) => {
+      if (!event.candidate) {
+        console.log(
+          "ICE gathering completed."
+        );
+
+        return;
+      }
+
+      console.log(
+        "Sending ICE candidate:",
+        event.candidate.candidate
+      );
+
+      if (
+        !ws ||
+        ws.readyState !==
+          WebSocket.OPEN
+      ) {
+        console.error(
+          "WebSocket is not available for ICE candidate."
+        );
+
+        return;
+      }
+
+      ws.send(
+        JSON.stringify({
+          type:
+            "ice_candidate",
+
+          to:
+            targetUser,
+
+          candidate:
+            event.candidate
+        })
+      );
+    };
+
+  /* =====================
+     ICE CONNECTION STATE
+  ===================== */
+
+  peerConnection
+    .oniceconnectionstatechange =
+    () => {
+      if (!peerConnection) {
+        return;
+      }
+
+      const state =
+        peerConnection.iceConnectionState;
+
+      console.log(
+        "ICE connection state:",
+        state
+      );
+
+      const status =
+        el("call-status");
+
+      if (!status) {
+        return;
+      }
+
+      switch (state) {
+        case "checking":
+          status.textContent =
+            "Connecting...";
+          break;
+
+        case "connected":
+        case "completed":
+          status.textContent =
+            "Connected";
+          break;
+
+        case "disconnected":
+          status.textContent =
+            "Connection interrupted...";
+          break;
+
+        case "failed":
+          status.textContent =
+            "Connection failed.";
+          break;
+
+        case "closed":
+          console.log(
+            "ICE connection closed."
+          );
+          break;
+      }
+    };
+
+  /* =====================
+     PEER CONNECTION STATE
+  ===================== */
+
+  peerConnection
+    .onconnectionstatechange =
+    () => {
+      if (!peerConnection) {
+        return;
+      }
+
+      const state =
+        peerConnection.connectionState;
+
+      console.log(
+        "Peer connection state:",
+        state
+      );
+
+      const status =
+        el("call-status");
+
+      if (!status) {
+        return;
+      }
+
+      switch (state) {
+        case "connecting":
+          status.textContent =
+            "Connecting...";
+          break;
+
+        case "connected":
+          status.textContent =
+            "Connected";
+          break;
+
+        case "disconnected":
+          status.textContent =
+            "Connection interrupted...";
+          break;
+
+        case "failed":
+          status.textContent =
+            "Connection failed.";
+          break;
+
+        case "closed":
+          console.log(
+            "Peer connection closed."
+          );
+          break;
+      }
+    };
 }
 
-async function startAudioCall() {
-  if (!activeChat) return;
+/* =========================
+   ADD REMOTE ICE CANDIDATE
+========================= */
 
-  const gotAudio = await setupLocalAudio();
-  if (!gotAudio) return;
-
-  currentCallTarget = activeChat;
-  isCaller = true;
-
-  showCallModal("Calling...", currentCallTarget, false, false, true);
-  createPeerConnection(currentCallTarget);
-
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-
-  ws.send(JSON.stringify({
-    type: "call_offer",
-    to: currentCallTarget,
-    offer: offer
-  }));
-}
-
-async function handleCallOffer(fromUser, offer) {
-  currentCallTarget = fromUser;
-  isCaller = false;
-
-  showCallModal("Incoming Audio Call", fromUser, true, true, false);
-  window.pendingCallOffer = offer;
-}
-
-async function acceptCall() {
-  const gotAudio = await setupLocalAudio();
-  if (!gotAudio) {
-    rejectCall();
+async function addRemoteIceCandidate(
+  candidate
+) {
+  if (!candidate) {
     return;
   }
 
-  showCallModal("Connected", currentCallTarget, false, false, true);
-  createPeerConnection(currentCallTarget);
+  if (!peerConnection) {
+    console.warn(
+      "PeerConnection does not exist. Queueing ICE candidate."
+    );
 
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(window.pendingCallOffer));
-  const answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
+    pendingIceCandidates.push(
+      candidate
+    );
 
-  ws.send(JSON.stringify({
-    type: "call_answer",
-    to: currentCallTarget,
-    answer: answer
-  }));
-
-  window.pendingCallOffer = null;
-}
-
-function rejectCall() {
-  if (ws && currentCallTarget) {
-    ws.send(JSON.stringify({ type: "call_end", to: currentCallTarget }));
-  }
-  cleanUpCall();
-}
-
-function endCall() {
-  if (ws && currentCallTarget) {
-    ws.send(JSON.stringify({ type: "call_end", to: currentCallTarget }));
-  }
-  cleanUpCall();
-}
-
-function cleanUpCall() {
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
-    localStream = null;
-  }
-  const remoteAudio = el("remote-audio");
-  if (remoteAudio) {
-    remoteAudio.srcObject = null;
+    return;
   }
 
-  currentCallTarget = null;
-  window.pendingCallOffer = null;
-  hideCallModal();
-}
+  if (!peerConnection.remoteDescription) {
+    console.log(
+      "Remote description not ready. Queueing ICE candidate."
+    );
 
-function showCallModal(statusText, userName, showAccept, showReject, showEnd) {
-  const modal = el("call-modal");
-  if (!modal) return;
+    pendingIceCandidates.push(
+      candidate
+    );
 
-  el("call-status").textContent = statusText;
-  el("call-user-name").textContent = userName;
+    return;
+  }
 
-  el("accept-call-btn").style.display = showAccept ? "inline-block" : "none";
-  el("reject-call-btn").style.display = showReject ? "inline-block" : "none";
-  el("end-call-btn").style.display = showEnd ? "inline-block" : "none";
+  try {
+    await peerConnection.addIceCandidate(
+      new RTCIceCandidate(candidate)
+    );
 
-  modal.style.display = "flex";
-}
-
-function hideCallModal() {
-  const modal = el("call-modal");
-  if (modal) {
-    modal.style.display = "none";
+    console.log(
+      "ICE candidate added."
+    );
+  } catch (error) {
+    console.error(
+      "Error adding ICE candidate:",
+      error
+    );
   }
 }
 
 /* =========================
-   ROSTER & CHAT UI
+   FLUSH ICE QUEUE
+========================= */
+
+async function flushPendingIceCandidates() {
+  if (!peerConnection) {
+    return;
+  }
+
+  if (!peerConnection.remoteDescription) {
+    return;
+  }
+
+  if (
+    pendingIceCandidates.length === 0
+  ) {
+    return;
+  }
+
+  console.log(
+    `Adding ${pendingIceCandidates.length} queued ICE candidates.`
+  );
+
+  const candidates =
+    [...pendingIceCandidates];
+
+  pendingIceCandidates = [];
+
+  for (
+    const candidate of candidates
+  ) {
+    try {
+      await peerConnection.addIceCandidate(
+        new RTCIceCandidate(candidate)
+      );
+
+      console.log(
+        "Queued ICE candidate added."
+      );
+    } catch (error) {
+      console.error(
+        "Failed to add queued ICE candidate:",
+        error
+      );
+    }
+  }
+}
+
+/* =========================
+   START AUDIO CALL
+========================= */
+
+async function startAudioCall() {
+  if (!activeChat) {
+    alert(
+      "Select a user first."
+    );
+
+    return;
+  }
+
+  if (peerConnection) {
+    alert(
+      "You are already in a call."
+    );
+
+    return;
+  }
+
+  if (
+    !ws ||
+    ws.readyState !==
+      WebSocket.OPEN
+  ) {
+    alert(
+      "Not connected to the server."
+    );
+
+    return;
+  }
+
+  if (!roster.has(activeChat)) {
+    alert(
+      "This user is currently offline."
+    );
+
+    return;
+  }
+
+  const gotAudio =
+    await setupLocalAudio();
+
+  if (!gotAudio) {
+    return;
+  }
+
+  currentCallTarget =
+    activeChat;
+
+  isCaller = true;
+
+  pendingIceCandidates = [];
+
+  showCallModal(
+    "Calling...",
+    currentCallTarget,
+    false,
+    false,
+    true
+  );
+
+  try {
+    createPeerConnection(
+      currentCallTarget
+    );
+
+    const offer =
+      await peerConnection.createOffer({
+        offerToReceiveAudio: true
+      });
+
+    await peerConnection.setLocalDescription(
+      offer
+    );
+
+    console.log(
+      "Sending call offer to:",
+      currentCallTarget
+    );
+
+    ws.send(
+      JSON.stringify({
+        type:
+          "call_offer",
+
+        to:
+          currentCallTarget,
+
+        offer:
+          peerConnection.localDescription
+      })
+    );
+  } catch (error) {
+    console.error(
+      "Could not start audio call:",
+      error
+    );
+
+    alert(
+      "Could not start the audio call."
+    );
+
+    cleanUpCall();
+  }
+}
+
+/* =========================
+   HANDLE INCOMING CALL
+========================= */
+
+async function handleCallOffer(
+  fromUser,
+  offer
+) {
+  console.log(
+    "Incoming audio call from:",
+    fromUser
+  );
+
+  if (
+    peerConnection ||
+    currentCallTarget
+  ) {
+    console.warn(
+      "Already in another call. Rejecting incoming call."
+    );
+
+    if (
+      ws &&
+      ws.readyState ===
+        WebSocket.OPEN
+    ) {
+      ws.send(
+        JSON.stringify({
+          type:
+            "call_end",
+
+          to:
+            fromUser
+        })
+      );
+    }
+
+    return;
+  }
+
+  currentCallTarget =
+    fromUser;
+
+  isCaller = false;
+
+  pendingIceCandidates = [];
+
+  window.pendingCallOffer =
+    offer;
+
+  showCallModal(
+    "Incoming Audio Call",
+    fromUser,
+    true,
+    true,
+    false
+  );
+}
+
+/* =========================
+   ACCEPT CALL
+========================= */
+
+async function acceptCall() {
+  if (
+    !currentCallTarget ||
+    !window.pendingCallOffer
+  ) {
+    console.error(
+      "No pending call to accept."
+    );
+
+    return;
+  }
+
+  const gotAudio =
+    await setupLocalAudio();
+
+  if (!gotAudio) {
+    rejectCall();
+
+    return;
+  }
+
+  showCallModal(
+    "Connecting...",
+    currentCallTarget,
+    false,
+    false,
+    true
+  );
+
+  try {
+    createPeerConnection(
+      currentCallTarget
+    );
+
+    /* =====================
+       SET REMOTE OFFER
+    ===================== */
+
+    await peerConnection.setRemoteDescription(
+      new RTCSessionDescription(
+        window.pendingCallOffer
+      )
+    );
+
+    console.log(
+      "Remote offer description set."
+    );
+
+    /* =====================
+       FLUSH ICE
+    ===================== */
+
+    await flushPendingIceCandidates();
+
+    /* =====================
+       CREATE ANSWER
+    ===================== */
+
+    const answer =
+      await peerConnection.createAnswer({
+        offerToReceiveAudio: true
+      });
+
+    /* =====================
+       SET LOCAL ANSWER
+    ===================== */
+
+    await peerConnection.setLocalDescription(
+      answer
+    );
+
+    /* =====================
+       SEND ANSWER
+    ===================== */
+
+    if (
+      !ws ||
+      ws.readyState !==
+        WebSocket.OPEN
+    ) {
+      throw new Error(
+        "WebSocket is not connected."
+      );
+    }
+
+    ws.send(
+      JSON.stringify({
+        type:
+          "call_answer",
+
+        to:
+          currentCallTarget,
+
+        answer:
+          peerConnection.localDescription
+      })
+    );
+
+    console.log(
+      "Call answer sent."
+    );
+
+    window.pendingCallOffer =
+      null;
+
+    /* =====================
+       REMOTE AUDIO PLAY
+    ===================== */
+
+    const remoteAudio =
+      el("remote-audio");
+
+    if (remoteAudio) {
+      try {
+        await remoteAudio.play();
+      } catch (error) {
+        console.warn(
+          "Remote audio playback blocked:",
+          error
+        );
+      }
+    }
+  } catch (error) {
+    console.error(
+      "Could not accept audio call:",
+      error
+    );
+
+    alert(
+      "Could not establish the audio call."
+    );
+
+    cleanUpCall();
+  }
+}
+
+/* =========================
+   REJECT CALL
+========================= */
+
+function rejectCall() {
+  console.log(
+    "Rejecting call from:",
+    currentCallTarget
+  );
+
+  if (
+    ws &&
+    ws.readyState ===
+      WebSocket.OPEN &&
+    currentCallTarget
+  ) {
+    ws.send(
+      JSON.stringify({
+        type:
+          "call_end",
+
+        to:
+          currentCallTarget
+      })
+    );
+  }
+
+  cleanUpCall();
+}
+
+/* =========================
+   END CALL
+========================= */
+
+function endCall() {
+  console.log(
+    "Ending call with:",
+    currentCallTarget
+  );
+
+  if (
+    ws &&
+    ws.readyState ===
+      WebSocket.OPEN &&
+    currentCallTarget
+  ) {
+    ws.send(
+      JSON.stringify({
+        type:
+          "call_end",
+
+        to:
+          currentCallTarget
+      })
+    );
+  }
+
+  cleanUpCall();
+}
+
+/* =========================
+   CLEANUP CALL
+========================= */
+
+function cleanUpCall() {
+  console.log(
+    "Cleaning up call."
+  );
+
+  /* =====================
+     PEER CONNECTION
+  ===================== */
+
+  if (peerConnection) {
+    try {
+      peerConnection.ontrack = null;
+      peerConnection.onicecandidate = null;
+      peerConnection.oniceconnectionstatechange = null;
+      peerConnection.onconnectionstatechange = null;
+
+      peerConnection.close();
+    } catch (error) {
+      console.error(
+        "PeerConnection cleanup error:",
+        error
+      );
+    }
+
+    peerConnection = null;
+  }
+
+  /* =====================
+     MICROPHONE
+  ===================== */
+
+  if (localStream) {
+    localStream
+      .getTracks()
+      .forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
+      });
+
+    localStream = null;
+  }
+
+  /* =====================
+     REMOTE AUDIO
+  ===================== */
+
+  const remoteAudio =
+    el("remote-audio");
+
+  if (remoteAudio) {
+    try {
+      remoteAudio.pause();
+    } catch {}
+
+    remoteAudio.srcObject = null;
+  }
+
+  /* =====================
+     CLEAR CALL STATE
+  ===================== */
+
+  pendingIceCandidates = [];
+
+  currentCallTarget = null;
+
+  isCaller = false;
+
+  window.pendingCallOffer =
+    null;
+
+  hideCallModal();
+}
+
+/* =========================
+   CALL MODAL
+========================= */
+
+function showCallModal(
+  statusText,
+  userName,
+  showAccept,
+  showReject,
+  showEnd
+) {
+  const modal =
+    el("call-modal");
+
+  if (!modal) {
+    return;
+  }
+
+  const status =
+    el("call-status");
+
+  const user =
+    el("call-user-name");
+
+  const acceptBtn =
+    el("accept-call-btn");
+
+  const rejectBtn =
+    el("reject-call-btn");
+
+  const endBtn =
+    el("end-call-btn");
+
+  if (status) {
+    status.textContent =
+      statusText;
+  }
+
+  if (user) {
+    user.textContent =
+      userName;
+  }
+
+  if (acceptBtn) {
+    acceptBtn.style.display =
+      showAccept
+        ? "inline-block"
+        : "none";
+  }
+
+  if (rejectBtn) {
+    rejectBtn.style.display =
+      showReject
+        ? "inline-block"
+        : "none";
+  }
+
+  if (endBtn) {
+    endBtn.style.display =
+      showEnd
+        ? "inline-block"
+        : "none";
+  }
+
+  modal.style.display =
+    "flex";
+}
+
+function hideCallModal() {
+  const modal =
+    el("call-modal");
+
+  if (modal) {
+    modal.style.display =
+      "none";
+  }
+}
+
+/* =========================
+   ROSTER
 ========================= */
 
 function renderRoster() {
-  const count = el("roster-count");
-  const list = el("roster");
+  const count =
+    el("roster-count");
 
-  count.textContent = roster.size;
+  const list =
+    el("roster");
+
+  if (!count || !list) {
+    return;
+  }
+
+  count.textContent =
+    roster.size;
+
   list.innerHTML = "";
 
-  for (const [username] of roster) {
-    const li = document.createElement("li");
-    li.className = username === activeChat ? "active" : "";
+  for (
+    const [username]
+    of roster
+  ) {
+    const li =
+      document.createElement(
+        "li"
+      );
 
-    const name = document.createElement("span");
-    name.className = "name";
+    li.className =
+      username === activeChat
+        ? "active"
+        : "";
 
-    const dot = document.createElement("span");
-    dot.className = "dot";
+    const name =
+      document.createElement(
+        "span"
+      );
 
-    name.appendChild(dot);
-    const text = document.createTextNode(username);
-    name.appendChild(text);
+    name.className =
+      "name";
 
-    li.appendChild(name);
-    li.addEventListener("click", () => {
-      selectChat(username);
-    });
+    const dot =
+      document.createElement(
+        "span"
+      );
 
-    list.appendChild(li);
+    dot.className =
+      "dot";
+
+    name.appendChild(
+      dot
+    );
+
+    const text =
+      document.createTextNode(
+        username
+      );
+
+    name.appendChild(
+      text
+    );
+
+    li.appendChild(
+      name
+    );
+
+    li.addEventListener(
+      "click",
+      () => {
+        selectChat(
+          username
+        );
+      }
+    );
+
+    list.appendChild(
+      li
+    );
   }
 }
 
-function selectChat(username) {
-  const publicKey = roster.get(username);
-  if (!publicKey) return;
+/* =========================
+   SELECT CHAT
+========================= */
 
-  activeChat = username;
+function selectChat(
+  username
+) {
+  const publicKey =
+    roster.get(username);
 
-  el("chat-with").textContent = username;
-  renderFingerprint(publicKey, el("chat-with-fp"), 5);
+  if (!publicKey) {
+    return;
+  }
 
-  el("message-input").disabled = false;
-  el("send-btn").disabled = false;
+  activeChat =
+    username;
 
-  const callBtn = el("call-btn");
+  const chatWith =
+    el("chat-with");
+
+  if (chatWith) {
+    chatWith.textContent =
+      username;
+  }
+
+  renderFingerprint(
+    publicKey,
+    el("chat-with-fp"),
+    5
+  );
+
+  const messageInput =
+    el("message-input");
+
+  const sendBtn =
+    el("send-btn");
+
+  if (messageInput) {
+    messageInput.disabled =
+      false;
+  }
+
+  if (sendBtn) {
+    sendBtn.disabled =
+      false;
+  }
+
+  const callBtn =
+    el("call-btn");
+
   if (callBtn) {
-    callBtn.style.display = "inline-block";
+    callBtn.style.display =
+      "inline-block";
   }
 
   renderRoster();
-  renderMessages(username);
-  el("message-input").focus();
+
+  renderMessages(
+    username
+  );
+
+  if (messageInput) {
+    messageInput.focus();
+  }
 }
 
-function renderMessages(username) {
-  const box = el("messages");
+/* =========================
+   RENDER MESSAGES
+========================= */
+
+function renderMessages(
+  username
+) {
+  const box =
+    el("messages");
+
+  if (!box) {
+    return;
+  }
+
   box.innerHTML = "";
 
-  const log = messageLog.get(username) || [];
+  const log =
+    messageLog.get(
+      username
+    ) || [];
 
-  for (const item of log) {
+  for (
+    const item of log
+  ) {
     if (item.system) {
-      const div = document.createElement("div");
-      div.className = "system-note";
-      div.textContent = item.text;
-      box.appendChild(div);
+      const div =
+        document.createElement(
+          "div"
+        );
+
+      div.className =
+        "system-note";
+
+      div.textContent =
+        item.text;
+
+      box.appendChild(
+        div
+      );
+
       continue;
     }
 
-    const div = document.createElement("div");
-    div.className = `msg ${item.mine ? "mine" : "theirs"}`;
+    const div =
+      document.createElement(
+        "div"
+      );
 
-    const text = document.createTextNode(item.text);
-    div.appendChild(text);
+    div.className =
+      `msg ${
+        item.mine
+          ? "mine"
+          : "theirs"
+      }`;
 
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = new Date(item.ts).toLocaleTimeString();
+    const text =
+      document.createTextNode(
+        item.text
+      );
 
-    div.appendChild(meta);
-    box.appendChild(div);
+    div.appendChild(
+      text
+    );
+
+    const meta =
+      document.createElement(
+        "span"
+      );
+
+    meta.className =
+      "meta";
+
+    meta.textContent =
+      new Date(
+        item.ts
+      ).toLocaleTimeString();
+
+    div.appendChild(
+      meta
+    );
+
+    box.appendChild(
+      div
+    );
   }
 
-  box.scrollTop = box.scrollHeight;
+  box.scrollTop =
+    box.scrollHeight;
 }
 
-function appendMessage(username, item) {
-  if (!messageLog.has(username)) {
-    messageLog.set(username, []);
+/* =========================
+   APPEND MESSAGE
+========================= */
+
+function appendMessage(
+  username,
+  item
+) {
+  if (
+    !messageLog.has(
+      username
+    )
+  ) {
+    messageLog.set(
+      username,
+      []
+    );
   }
 
-  const log = messageLog.get(username);
+  const log =
+    messageLog.get(
+      username
+    );
+
   log.push(item);
 
-  if (log.length > MAX_MESSAGES_PER_CHAT) {
+  if (
+    log.length >
+    MAX_MESSAGES_PER_CHAT
+  ) {
     log.shift();
   }
 }
 
-function addSystemNote(username, text) {
-  if (!username) return;
-  appendMessage(username, { system: true, text });
-  if (activeChat === username) {
-    renderMessages(username);
-  }
-}
+/* =========================
+   SYSTEM NOTE
+========================= */
 
-async function sendMessage() {
-  if (!activeChat) return;
-
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    alert("Not connected to the server.");
+function addSystemNote(
+  username,
+  text
+) {
+  if (!username) {
     return;
   }
 
-  const input = el("message-input");
-  const text = input.value.trim();
-  if (!text) return;
+  appendMessage(
+    username,
+    {
+      system: true,
+      text
+    }
+  );
 
-  const recipientPublicKey = roster.get(activeChat);
+  if (
+    activeChat ===
+    username
+  ) {
+    renderMessages(
+      username
+    );
+  }
+}
+
+/* =========================
+   SEND MESSAGE
+========================= */
+
+async function sendMessage() {
+  if (!activeChat) {
+    return;
+  }
+
+  if (
+    !ws ||
+    ws.readyState !==
+      WebSocket.OPEN
+  ) {
+    alert(
+      "Not connected to the server."
+    );
+
+    return;
+  }
+
+  const input =
+    el("message-input");
+
+  if (!input) {
+    return;
+  }
+
+  const text =
+    input.value.trim();
+
+  if (!text) {
+    return;
+  }
+
+  const recipientPublicKey =
+    roster.get(
+      activeChat
+    );
+
   if (!recipientPublicKey) {
-    alert("Recipient key is not available.");
+    alert(
+      "Recipient key is not available."
+    );
+
     return;
   }
 
   try {
-    const { messageKey, ratchetPublicKeyB64 } = await getSendingMessageKey(
-      activeChat,
-      recipientPublicKey
-    );
+    const {
+      messageKey,
+      ratchetPublicKeyB64
+    } =
+      await getSendingMessageKey(
+        activeChat,
+        recipientPublicKey
+      );
 
-    const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
-    const ciphertext = sodium.crypto_secretbox_easy(text, nonce, messageKey);
+    const nonce =
+      sodium.randombytes_buf(
+        sodium.crypto_secretbox_NONCEBYTES
+      );
+
+    const ciphertext =
+      sodium.crypto_secretbox_easy(
+        text,
+        nonce,
+        messageKey
+      );
 
     ws.send(
       JSON.stringify({
-        type: "message",
-        to: activeChat,
-        nonce: sodium.to_base64(nonce),
-        ciphertext: sodium.to_base64(ciphertext),
-        ratchetPublicKey: ratchetPublicKeyB64,
+        type:
+          "message",
+
+        to:
+          activeChat,
+
+        nonce:
+          sodium.to_base64(
+            nonce
+          ),
+
+        ciphertext:
+          sodium.to_base64(
+            ciphertext
+          ),
+
+        ratchetPublicKey:
+          ratchetPublicKeyB64
       })
     );
 
-    appendMessage(activeChat, {
-      mine: true,
-      text,
-      ts: Date.now(),
-    });
+    appendMessage(
+      activeChat,
+      {
+        mine: true,
+        text,
+        ts: Date.now()
+      }
+    );
 
-    renderMessages(activeChat);
+    renderMessages(
+      activeChat
+    );
 
     input.value = "";
+
     input.focus();
   } catch (error) {
-    console.error("Encryption/send error:", error);
-    alert("Could not encrypt/send the message.");
+    console.error(
+      "Encryption/send error:",
+      error
+    );
+
+    alert(
+      "Could not encrypt/send the message."
+    );
   }
 }
 
-async function decryptFrom(fromUsername, nonceB64, ciphertextB64, ratchetPublicKeyB64) {
-  const senderPublicKeyB64 = roster.get(fromUsername);
-  if (!senderPublicKeyB64) return null;
+/* =========================
+   DECRYPT MESSAGE
+========================= */
+
+async function decryptFrom(
+  fromUsername,
+  nonceB64,
+  ciphertextB64,
+  ratchetPublicKeyB64
+) {
+  const senderPublicKeyB64 =
+    roster.get(
+      fromUsername
+    );
+
+  if (!senderPublicKeyB64) {
+    return null;
+  }
 
   try {
-    const messageKey = await getReceivingMessageKey(
-      fromUsername,
-      senderPublicKeyB64,
-      ratchetPublicKeyB64
+    const messageKey =
+      await getReceivingMessageKey(
+        fromUsername,
+        senderPublicKeyB64,
+        ratchetPublicKeyB64
+      );
+
+    if (!messageKey) {
+      return null;
+    }
+
+    const opened =
+      sodium.crypto_secretbox_open_easy(
+        sodium.from_base64(
+          ciphertextB64
+        ),
+
+        sodium.from_base64(
+          nonceB64
+        ),
+
+        messageKey
+      );
+
+    return sodium.to_string(
+      opened
     );
-
-    if (!messageKey) return null;
-
-    const opened = sodium.crypto_secretbox_open_easy(
-      sodium.from_base64(ciphertextB64),
-      sodium.from_base64(nonceB64),
-      messageKey
-    );
-
-    return sodium.to_string(opened);
   } catch (error) {
-    console.error("Decrypt error:", error);
+    console.error(
+      "Decrypt error:",
+      error
+    );
+
     return null;
   }
 }
@@ -1082,60 +2977,163 @@ async function decryptFrom(fromUsername, nonceB64, ciphertextB64, ratchetPublicK
    EVENTS
 ========================= */
 
-document.addEventListener("DOMContentLoaded", async () => {
-  try {
-    await sodiumReady();
-    console.log("libsodium ready.");
+document.addEventListener(
+  "DOMContentLoaded",
+  async () => {
+    try {
+      await sodiumReady();
 
-    const loginForm = el("login-form");
-    const registerBtn = el("register-btn");
-    const messageForm = el("message-form");
-    const callBtn = el("call-btn");
+      console.log(
+        "libsodium ready."
+      );
 
-    const acceptCallBtn = el("accept-call-btn");
-    const rejectCallBtn = el("reject-call-btn");
-    const endCallBtn = el("end-call-btn");
+      const loginForm =
+        el("login-form");
 
-    if (loginForm) {
-      loginForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        await login();
-      });
+      const registerBtn =
+        el("register-btn");
+
+      const messageForm =
+        el("message-form");
+
+      const callBtn =
+        el("call-btn");
+
+      const acceptCallBtn =
+        el("accept-call-btn");
+
+      const rejectCallBtn =
+        el("reject-call-btn");
+
+      const endCallBtn =
+        el("end-call-btn");
+
+      /* ===================
+         LOGIN
+      =================== */
+
+      if (loginForm) {
+        loginForm.addEventListener(
+          "submit",
+          async (event) => {
+            event.preventDefault();
+
+            await login();
+          }
+        );
+      }
+
+      /* ===================
+         REGISTER
+      =================== */
+
+      if (registerBtn) {
+        registerBtn.addEventListener(
+          "click",
+          async () => {
+            await register();
+          }
+        );
+      }
+
+      /* ===================
+         MESSAGES
+      =================== */
+
+      if (messageForm) {
+        messageForm.addEventListener(
+          "submit",
+          async (event) => {
+            event.preventDefault();
+
+            await sendMessage();
+          }
+        );
+      }
+
+      /* ===================
+         START CALL
+      =================== */
+
+      if (callBtn) {
+        callBtn.addEventListener(
+          "click",
+          async () => {
+            await startAudioCall();
+          }
+        );
+      }
+
+      /* ===================
+         ACCEPT CALL
+      =================== */
+
+      if (acceptCallBtn) {
+        acceptCallBtn.addEventListener(
+          "click",
+          async () => {
+            await acceptCall();
+          }
+        );
+      }
+
+      /* ===================
+         REJECT CALL
+      =================== */
+
+      if (rejectCallBtn) {
+        rejectCallBtn.addEventListener(
+          "click",
+          rejectCall
+        );
+      }
+
+      /* ===================
+         END CALL
+      =================== */
+
+      if (endCallBtn) {
+        endCallBtn.addEventListener(
+          "click",
+          endCall
+        );
+      }
+
+      /* ===================
+         SAVED AUTH
+      =================== */
+
+      const savedAuth =
+        loadAuth();
+
+      if (
+        savedAuth &&
+        savedAuth.username
+      ) {
+        const usernameInput =
+          el("username");
+
+        if (usernameInput) {
+          usernameInput.value =
+            savedAuth.username;
+        }
+
+        const passwordInput =
+          el("password");
+
+        if (passwordInput) {
+          passwordInput.focus();
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Application startup error:",
+        error
+      );
+
+      showAuthError(
+        "Could not start encryption system. Check that libsodium loaded correctly."
+      );
     }
-
-    if (registerBtn) {
-      registerBtn.addEventListener("click", async () => {
-        await register();
-      });
-    }
-
-    if (messageForm) {
-      messageForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        await sendMessage();
-      });
-    }
-
-    if (callBtn) {
-      callBtn.addEventListener("click", () => {
-        startAudioCall();
-      });
-    }
-
-    if (acceptCallBtn) acceptCallBtn.addEventListener("click", acceptCall);
-    if (rejectCallBtn) rejectCallBtn.addEventListener("click", rejectCall);
-    if (endCallBtn) endCallBtn.addEventListener("click", endCall);
-
-    const savedAuth = loadAuth();
-    if (savedAuth && savedAuth.username) {
-      const usernameInput = el("username");
-      if (usernameInput) usernameInput.value = savedAuth.username;
-      const passwordInput = el("password");
-      if (passwordInput) passwordInput.focus();
-    }
-  } catch (error) {
-    console.error("Application startup error:", error);
-    showAuthError("Could not start encryption system. Check that libsodium loaded correctly.");
   }
-});
-
+);
