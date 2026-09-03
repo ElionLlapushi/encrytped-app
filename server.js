@@ -469,6 +469,51 @@ app.put("/api/me/public-key", async (req, res) => {
 });
 
 /* =========================
+   TURN CREDENTIALS
+   (kërkohen për thirrjet audio mes rrjetesh
+   të ndryshme, p.sh. telefon me 4G/5G kundrejt
+   laptopi me WiFi, ku lidhja direkte P2P dështon)
+========================= */
+
+app.get("/api/turn-credentials", async (req, res) => {
+  try {
+    const token = getBearerToken(req);
+    const user = await getUserFromToken(token);
+
+    if (!user) {
+      return res.status(401).json({
+        error: "Not authenticated."
+      });
+    }
+
+    if (!process.env.METERED_DOMAIN || !process.env.METERED_SECRET_KEY) {
+      console.error("TURN credentials error: METERED_DOMAIN or METERED_SECRET_KEY not configured.");
+      return res.status(500).json({
+        error: "TURN server is not configured."
+      });
+    }
+
+    const response = await fetch(
+      `https://${process.env.METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${process.env.METERED_SECRET_KEY}`
+    );
+
+    if (!response.ok) {
+      throw new Error(`Metered API returned ${response.status}`);
+    }
+
+    const iceServers = await response.json();
+
+    res.json({ iceServers });
+  } catch (error) {
+    console.error("TURN credentials error:", error);
+
+    res.status(500).json({
+      error: "Could not fetch TURN credentials."
+    });
+  }
+});
+
+/* =========================
    WEBSOCKET CLIENTS
 ========================= */
 
@@ -823,3 +868,4 @@ async function shutdown(signal) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+

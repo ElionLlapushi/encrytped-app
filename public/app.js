@@ -10,6 +10,63 @@ const messageLog = new Map();
 const MAX_MESSAGES_PER_CHAT = 100;
 
 /* =========================
+   SECURE INDEXEDDB STORAGE
+========================= */
+
+const DB_NAME = "SealedSecureDB";
+const DB_VERSION = 1;
+const STORE_KEYS = "keys";
+
+function openSecureDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(STORE_KEYS)) {
+        db.createObjectStore(STORE_KEYS);
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function setSecureItem(key, value) {
+  const db = await openSecureDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_KEYS, "readwrite");
+    const store = tx.objectStore(STORE_KEYS);
+    const request = store.put(value, key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getSecureItem(key) {
+  const db = await openSecureDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_KEYS, "readonly");
+    const store = tx.objectStore(STORE_KEYS);
+    const request = store.get(key);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function removeSecureItem(key) {
+  const db = await openSecureDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_KEYS, "readwrite");
+    const store = tx.objectStore(STORE_KEYS);
+    const request = store.delete(key);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/* =========================
    WEBRTC AUDIO CALL STATE
 ========================= */
 let peerConnection = null;
@@ -18,13 +75,24 @@ let currentCallTarget = null;
 let isCaller = false;
 
 // STUN + TURN (Me fallback për transmetim midis rrjeteve të ndryshme si 4G/Wi-Fi)
-const rtcConfig = {
+let rtcConfig = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" }
   ]
 };
+
+async function loadRtcConfig() {
+  try {
+    const data = await apiRequest("/api/turn-credentials", "GET");
+    if (data.iceServers && data.iceServers.length) {
+      rtcConfig = { iceServers: data.iceServers };
+    }
+  } catch (error) {
+    console.error("Could not load TURN config, falling back to STUN only:", error);
+  }
+}
 
 const el = (id) => document.getElementById(id);
 
@@ -63,7 +131,7 @@ function deriveKeyFromPassword(password, saltBytes) {
   );
 }
 
-function saveIdentity(password) {
+async function saveIdentity(password) {
   if (!myKeyPair || !myUsername || !password) return;
 
   const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES);
@@ -76,24 +144,23 @@ function saveIdentity(password) {
     derivedKey
   );
 
-  localStorage.setItem(
-    "sealed_identity",
-    JSON.stringify({
-      username: myUsername,
-      publicKey: sodium.to_base64(myKeyPair.publicKey),
-      salt: sodium.to_base64(salt),
-      nonce: sodium.to_base64(nonce),
-      encryptedPrivateKey: sodium.to_base64(encryptedPrivateKey),
-    })
-  );
+  const identityData = {
+    username: myUsername,
+    publicKey: sodium.to_base64(myKeyPair.publicKey),
+    salt: sodium.to_base64(salt),
+    nonce: sodium.to_base64(nonce),
+    encryptedPrivateKey: sodium.to_base64(encryptedPrivateKey),
+  };
+
+  await setSecureItem("sealed_identity", identityData);
 }
 
-function loadRawIdentity() {
+async function loadRawIdentity() {
   try {
-    const raw = localStorage.getItem("sealed_identity");
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
+    const data = await getSecureItem("sealed_identity");
+    return data || null;
+  } catch (error) {
+    console.error("Error loading identity from IndexedDB:", error);
     return null;
   }
 }
@@ -302,20 +369,19 @@ function ratchetStorageKey(contactUsername) {
   return `sealed_ratchet_${myUsername}_${contactUsername}`;
 }
 
-function loadRatchetState(contactUsername) {
+async function loadRatchetState(contactUsername) {
   try {
-    const raw = localStorage.getItem(ratchetStorageKey(contactUsername));
+    const raw = await getSecureItem(ratchetStorageKey(contactUsername));
     if (!raw) return null;
-    const p = JSON.parse(raw);
 
     return {
-      rootKey: sodium.from_base64(p.rootKey),
-      ratchetPrivateKey: p.ratchetPrivateKey ? sodium.from_base64(p.ratchetPrivateKey) : null,
-      ratchetPublicKey: p.ratchetPublicKey ? sodium.from_base64(p.ratchetPublicKey) : null,
-      remoteRatchetPublicKey: p.remoteRatchetPublicKey ? sodium.from_base64(p.remoteRatchetPublicKey) : null,
-      sendChainKey: p.sendChainKey ? sodium.from_base64(p.sendChainKey) : null,
-      recvChainKey: p.recvChainKey ? sodium.from_base64(p.recvChainKey) : null,
-      needsSendRatchet: !!p.needsSendRatchet
+      rootKey: sodium.from_base64(raw.rootKey),
+      ratchetPrivateKey: raw.ratchetPrivateKey ? sodium.from_base64(raw.ratchetPrivateKey) : null,
+      ratchetPublicKey: raw.ratchetPublicKey ? sodium.from_base64(raw.ratchetPublicKey) : null,
+      remoteRatchetPublicKey: raw.remoteRatchetPublicKey ? sodium.from_base64(raw.remoteRatchetPublicKey) : null,
+      sendChainKey: raw.sendChainKey ? sodium.from_base64(raw.sendChainKey) : null,
+      recvChainKey: raw.recvChainKey ? sodium.from_base64(raw.recvChainKey) : null,
+      needsSendRatchet: !!raw.needsSendRatchet
     };
   } catch (error) {
     console.error("Ratchet state load error:", error);
@@ -323,10 +389,10 @@ function loadRatchetState(contactUsername) {
   }
 }
 
-function saveRatchetState(contactUsername, state) {
-  localStorage.setItem(
+async function saveRatchetState(contactUsername, state) {
+  await setSecureItem(
     ratchetStorageKey(contactUsername),
-    JSON.stringify({
+    {
       rootKey: sodium.to_base64(state.rootKey),
       ratchetPrivateKey: state.ratchetPrivateKey ? sodium.to_base64(state.ratchetPrivateKey) : null,
       ratchetPublicKey: state.ratchetPublicKey ? sodium.to_base64(state.ratchetPublicKey) : null,
@@ -334,7 +400,7 @@ function saveRatchetState(contactUsername, state) {
       sendChainKey: state.sendChainKey ? sodium.to_base64(state.sendChainKey) : null,
       recvChainKey: state.recvChainKey ? sodium.to_base64(state.recvChainKey) : null,
       needsSendRatchet: state.needsSendRatchet
-    })
+    }
   );
 }
 
@@ -357,8 +423,8 @@ function initRatchetState(theirIdentityPublicKeyB64) {
   };
 }
 
-function getSendingMessageKey(contactUsername, theirIdentityPublicKeyB64) {
-  let state = loadRatchetState(contactUsername);
+async function getSendingMessageKey(contactUsername, theirIdentityPublicKeyB64) {
+  let state = await loadRatchetState(contactUsername);
   if (!state) {
     state = initRatchetState(theirIdentityPublicKeyB64);
   }
@@ -380,7 +446,7 @@ function getSendingMessageKey(contactUsername, theirIdentityPublicKeyB64) {
   const { messageKey, nextChainKey } = kdfChainStep(state.sendChainKey);
   state.sendChainKey = nextChainKey;
 
-  saveRatchetState(contactUsername, state);
+  await saveRatchetState(contactUsername, state);
 
   return {
     messageKey,
@@ -388,8 +454,8 @@ function getSendingMessageKey(contactUsername, theirIdentityPublicKeyB64) {
   };
 }
 
-function getReceivingMessageKey(contactUsername, theirIdentityPublicKeyB64, senderRatchetPublicKeyB64) {
-  let state = loadRatchetState(contactUsername);
+async function getReceivingMessageKey(contactUsername, theirIdentityPublicKeyB64, senderRatchetPublicKeyB64) {
+  let state = await loadRatchetState(contactUsername);
   if (!state) {
     state = initRatchetState(theirIdentityPublicKeyB64);
   }
@@ -425,7 +491,7 @@ function getReceivingMessageKey(contactUsername, theirIdentityPublicKeyB64, send
   const { messageKey, nextChainKey } = kdfChainStep(state.recvChainKey);
   state.recvChainKey = nextChainKey;
 
-  saveRatchetState(contactUsername, state);
+  await saveRatchetState(contactUsername, state);
   return messageKey;
 }
 
@@ -465,7 +531,7 @@ async function register() {
     myUsername = result.user.username;
 
     saveAuth();
-    saveIdentity(password);
+    await saveIdentity(password);
     connectWebSocket();
   } catch (error) {
     console.error("Registration error:", error);
@@ -493,7 +559,7 @@ async function login() {
     authToken = result.token;
     myUsername = result.user.username;
 
-    const stored = loadRawIdentity();
+    const stored = await loadRawIdentity();
     if (stored && stored.username === myUsername) {
       try {
         myKeyPair = decryptIdentity(password, stored);
@@ -505,7 +571,7 @@ async function login() {
       }
     } else {
       ensureKeyPair();
-      saveIdentity(password);
+      await saveIdentity(password);
     }
 
     saveAuth();
@@ -559,7 +625,7 @@ function connectWebSocket() {
 
   ws.addEventListener("close", () => {
     console.log("WebSocket disconnected.");
-    cleanUpCall(); // Ndërpret telefonatën automatikisht nëse shkëputet rrjeti
+    cleanUpCall(); 
     if (el("chat-screen").hidden === false) {
       addSystemNote(activeChat, "Disconnected from server. Refresh to reconnect.");
     }
@@ -575,6 +641,7 @@ async function handleServerMessage(msg) {
     case "authenticated":
       myUsername = msg.username;
       saveAuth();
+      await loadRtcConfig();
       setLoading(false);
       showChatScreen();
       break;
@@ -604,7 +671,7 @@ async function handleServerMessage(msg) {
       break;
 
     case "message": {
-      const plaintext = decryptFrom(msg.from, msg.nonce, msg.ciphertext, msg.ratchetPublicKey);
+      const plaintext = await decryptFrom(msg.from, msg.nonce, msg.ciphertext, msg.ratchetPublicKey);
 
       if (plaintext === null) {
         addSystemNote(msg.from, "Could not verify or decrypt this message.");
@@ -614,7 +681,7 @@ async function handleServerMessage(msg) {
       appendMessage(msg.from, {
         mine: false,
         text: plaintext,
-        ts: msg.timestamp || Date.now(),
+        ts: msg.timestamp || Date.Now(),
       });
 
       if (activeChat === msg.from) {
@@ -919,7 +986,6 @@ function appendMessage(username, item) {
   const log = messageLog.get(username);
   log.push(item);
 
-  // Kufizon numrin e mesazheve për të mbrojtur memorien
   if (log.length > MAX_MESSAGES_PER_CHAT) {
     log.shift();
   }
@@ -933,7 +999,7 @@ function addSystemNote(username, text) {
   }
 }
 
-function sendMessage() {
+async function sendMessage() {
   if (!activeChat) return;
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -952,7 +1018,7 @@ function sendMessage() {
   }
 
   try {
-    const { messageKey, ratchetPublicKeyB64 } = getSendingMessageKey(
+    const { messageKey, ratchetPublicKeyB64 } = await getSendingMessageKey(
       activeChat,
       recipientPublicKey
     );
@@ -986,12 +1052,12 @@ function sendMessage() {
   }
 }
 
-function decryptFrom(fromUsername, nonceB64, ciphertextB64, ratchetPublicKeyB64) {
+async function decryptFrom(fromUsername, nonceB64, ciphertextB64, ratchetPublicKeyB64) {
   const senderPublicKeyB64 = roster.get(fromUsername);
   if (!senderPublicKeyB64) return null;
 
   try {
-    const messageKey = getReceivingMessageKey(
+    const messageKey = await getReceivingMessageKey(
       fromUsername,
       senderPublicKeyB64,
       ratchetPublicKeyB64
@@ -1044,9 +1110,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     if (messageForm) {
-      messageForm.addEventListener("submit", (event) => {
+      messageForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        sendMessage();
+        await sendMessage();
       });
     }
 
@@ -1072,3 +1138,4 @@ document.addEventListener("DOMContentLoaded", async () => {
     showAuthError("Could not start encryption system. Check that libsodium loaded correctly.");
   }
 });
+
