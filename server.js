@@ -468,11 +468,9 @@ app.put("/api/me/public-key", async (req, res) => {
   }
 });
 
+
 /* =========================
    TURN CREDENTIALS
-   (kërkohen për thirrjet audio mes rrjetesh
-   të ndryshme, p.sh. telefon me 4G/5G kundrejt
-   laptopi me WiFi, ku lidhja direkte P2P dështon)
 ========================= */
 
 app.get("/api/turn-credentials", async (req, res) => {
@@ -487,31 +485,100 @@ app.get("/api/turn-credentials", async (req, res) => {
     }
 
     if (!process.env.METERED_DOMAIN || !process.env.METERED_SECRET_KEY) {
-      console.error("TURN credentials error: METERED_DOMAIN or METERED_SECRET_KEY not configured.");
+      console.error(
+        "TURN credentials error: METERED_DOMAIN or METERED_SECRET_KEY not configured."
+      );
+
       return res.status(500).json({
         error: "TURN server is not configured."
       });
     }
 
-    const response = await fetch(
-      `https://${process.env.METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${process.env.METERED_SECRET_KEY}`
-    );
+    const meteredUrl =
+      `https://${process.env.METERED_DOMAIN}/api/v1/turn/credential` +
+      `?secretKey=${encodeURIComponent(process.env.METERED_SECRET_KEY)}`;
+
+    const response = await fetch(meteredUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        expiryInSeconds: 3600,
+        label: user.username
+      })
+    });
 
     if (!response.ok) {
-      throw new Error(`Metered API returned ${response.status}`);
+      const errorText = await response.text();
+
+      console.error(
+        "Metered API error:",
+        response.status,
+        errorText
+      );
+
+      throw new Error(
+        `Metered API returned ${response.status}`
+      );
     }
 
-    const iceServers = await response.json();
+    const cred = await response.json();
 
-    res.json({ iceServers });
+    if (!cred.username || !cred.password) {
+      console.error(
+        "Metered API returned invalid credentials."
+      );
+
+      return res.status(500).json({
+        error: "Invalid TURN credentials received."
+      });
+    }
+
+    const iceServers = [
+      {
+        urls: "stun:stun.relay.metered.ca:80"
+      },
+      {
+        urls: "turn:global.relay.metered.ca:80",
+        username: cred.username,
+        credential: cred.password
+      },
+      {
+        urls: "turn:global.relay.metered.ca:80?transport=tcp",
+        username: cred.username,
+        credential: cred.password
+      },
+      {
+        urls: "turn:global.relay.metered.ca:443",
+        username: cred.username,
+        credential: cred.password
+      },
+      {
+        urls: "turns:global.relay.metered.ca:443?transport=tcp",
+        username: cred.username,
+        credential: cred.password
+      }
+    ];
+
+    console.log("TURN credentials loaded successfully.");
+
+    res.json({
+      iceServers
+    });
+
   } catch (error) {
-    console.error("TURN credentials error:", error);
+    console.error(
+      "TURN credentials error:",
+      error
+    );
 
     res.status(500).json({
       error: "Could not fetch TURN credentials."
     });
   }
 });
+
 
 /* =========================
    WEBSOCKET CLIENTS
