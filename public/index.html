@@ -2,36 +2,40 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#070b12" />
-  <title>sealed — encrypted chat</title>
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+
+  <meta name="theme-color" content="#080c12" />
+
+  <title>sealed / encrypted chat</title>
+
   <link rel="stylesheet" href="style.css" />
 </head>
 
 <body>
 
-  <!-- =========================
-       LOGIN
-  ========================== -->
+  <!-- =========================================================
+       LOGIN SCREEN
+  ========================================================== -->
 
   <section id="login-screen" class="screen">
 
-    <div class="login-background">
-      <div class="glow glow-1"></div>
-      <div class="glow glow-2"></div>
-    </div>
+    <div class="login-bg-glow glow-one"></div>
+    <div class="login-bg-glow glow-two"></div>
 
     <div class="login-card">
 
-      <div class="brand">
-        <div class="brand-mark">
+      <div class="brand-mark">
+        <div class="brand-icon">
           <span></span>
           <span></span>
         </div>
 
         <div>
           <div class="brand-name">sealed</div>
-          <div class="brand-subtitle">private communication</div>
+          <div class="brand-subtitle">private messenger</div>
         </div>
       </div>
 
@@ -40,13 +44,24 @@
         end-to-end encrypted
       </div>
 
-      <div class="login-copy">
-        <h1>Welcome back.</h1>
+      <div class="eyebrow">
+        SECURE CONNECTION
+      </div>
 
-        <p>
-          Your messages are encrypted in your browser
-          before they leave your device.
-        </p>
+      <h1>
+        Your conversations.
+        <span>Sealed.</span>
+      </h1>
+
+      <p class="lede">
+        Messages are encrypted in your browser before they
+        leave it. Your private key never goes to the server.
+      </p>
+
+      <div class="login-divider">
+        <span></span>
+        <div>AUTHENTICATION</div>
+        <span></span>
       </div>
 
       <form id="login-form">
@@ -59,15 +74,19 @@
 
           <div class="input-wrap">
 
-            <span class="input-icon">◎</span>
+            <span class="input-icon" aria-hidden="true">
+              @
+            </span>
 
             <input
               id="username"
               name="username"
               type="text"
               autocomplete="username"
-              placeholder="Enter your username"
+              placeholder="your username"
               required
+              autocapitalize="none"
+              spellcheck="false"
             />
 
           </div>
@@ -82,14 +101,16 @@
 
           <div class="input-wrap">
 
-            <span class="input-icon">⌁</span>
+            <span class="input-icon lock-icon" aria-hidden="true">
+              •
+            </span>
 
             <input
               id="password"
               name="password"
               type="password"
               autocomplete="current-password"
-              placeholder="Enter your password"
+              placeholder="minimum 8 characters"
               required
               minlength="8"
             />
@@ -103,8 +124,8 @@
           id="login-btn"
           class="primary-btn"
         >
-          <span>Sign in securely</span>
-          <span class="arrow">→</span>
+          <span>Login securely</span>
+          <span class="button-arrow">→</span>
         </button>
 
         <button
@@ -112,14 +133,14 @@
           id="register-btn"
           class="secondary-btn"
         >
-          Create a new account
+          Create account
         </button>
 
       </form>
 
       <div
         id="auth-error"
-        class="system-note auth-error"
+        class="system-note error-note"
         hidden
       ></div>
 
@@ -128,19 +149,26 @@
         class="key-status"
         hidden
       >
+
         <div
           class="spinner"
           aria-hidden="true"
         ></div>
 
         <span>
-          Preparing secure connection...
+          preparing secure connection...
         </span>
+
       </div>
 
       <div class="login-footer">
-        <span class="lock-icon">⌾</span>
-        Your private key never leaves this device.
+
+        <span class="footer-lock">◆</span>
+
+        <span>
+          Your private key stays on your device
+        </span>
+
       </div>
 
     </div>
@@ -148,9 +176,9 @@
   </section>
 
 
-  <!-- =========================
-       CHAT
-  ========================== -->
+  <!-- =========================================================
+       CHAT SCREEN
+  ========================================================== -->
 
   <section
     id="chat-screen"
@@ -158,24 +186,35 @@
     hidden
   >
 
-    <!-- SIDEBAR -->
+    <!-- Mobile backdrop -->
+    <div
+      class="sidebar-backdrop"
+      id="sidebar-backdrop"
+    ></div>
+
+
+    <!-- =======================================================
+         SIDEBAR
+    ======================================================== -->
 
     <aside class="sidebar">
 
       <div class="sidebar-top">
 
-        <div class="app-brand">
+        <div class="app-brand-small">
 
-          <div class="brand-mark small">
+          <div class="small-brand-icon">
             <span></span>
             <span></span>
           </div>
 
           <div>
-            <div class="app-brand-name">sealed</div>
-            <div class="app-brand-status">
-              <span></span>
-              secure
+            <div class="small-brand-name">
+              sealed
+            </div>
+
+            <div class="small-brand-status">
+              secure messenger
             </div>
           </div>
 
@@ -184,20 +223,20 @@
       </div>
 
 
-      <!-- MY PROFILE -->
+      <!-- Current user -->
 
       <div class="me-panel">
 
-        <div class="profile-avatar">
-          <span id="profile-initial">?</span>
+        <div class="me-avatar">
+          <span id="me-avatar-letter">—</span>
 
-          <div class="online-indicator"></div>
+          <span class="avatar-online"></span>
         </div>
 
-        <div class="profile-info">
+        <div class="me-info">
 
-          <div class="profile-label">
-            Signed in as
+          <div class="eyebrow">
+            signed in as
           </div>
 
           <div
@@ -212,16 +251,18 @@
       </div>
 
 
-      <!-- KEY -->
+      <!-- Fingerprint -->
 
-      <div class="key-panel">
+      <div class="fingerprint-card">
 
-        <div class="key-panel-header">
+        <div class="fingerprint-card-title">
 
-          <span class="key-icon">⌁</span>
+          <span class="fingerprint-shield">
+            ◆
+          </span>
 
           <span>
-            Your encryption key
+            Your key fingerprint
           </span>
 
         </div>
@@ -231,31 +272,39 @@
           id="me-fingerprint"
         ></div>
 
-        <div class="key-help">
-          Verify fingerprints with trusted contacts.
+        <div class="fingerprint-help">
+          Compare this fingerprint with your contact
+          before trusting a conversation.
         </div>
 
       </div>
 
 
-      <!-- CONTACTS -->
+      <!-- Online users -->
 
       <div class="roster-section">
 
         <div class="roster-header">
 
           <div class="roster-title">
-            Contacts
+
+            <span class="online-pulse"></span>
+
+            <span>
+              Online
+            </span>
+
           </div>
 
-          <div
+          <span
             id="roster-count"
             class="roster-count"
           >
             0
-          </div>
+          </span>
 
         </div>
+
 
         <ul
           id="roster"
@@ -267,53 +316,70 @@
 
       <div class="sidebar-footnote">
 
-        <div class="footnote-icon">
-          ✓
-        </div>
+        <span class="footnote-icon">⌁</span>
 
-        <div>
-          Messages are encrypted locally.
-          The server never receives your
-          private encryption key.
-        </div>
+        <span>
+          Conversations are encrypted before they
+          leave your device.
+        </span>
 
       </div>
 
     </aside>
 
 
-    <!-- CHAT AREA -->
+    <!-- =======================================================
+         MAIN CHAT
+    ======================================================== -->
 
     <main class="chat-pane">
 
-      <!-- HEADER -->
+
+      <!-- Chat header -->
 
       <header class="chat-header">
 
-        <div class="chat-contact">
+        <div class="chat-header-left">
 
-          <div class="chat-avatar">
-            <span id="chat-avatar-letter">?</span>
-            <div class="chat-online-dot"></div>
+          <!-- Mobile menu button -->
+
+          <button
+            type="button"
+            class="mobile-menu-btn"
+            id="mobile-menu-btn"
+            aria-label="Open conversations"
+          >
+            <span></span>
+            <span></span>
+            <span></span>
+          </button>
+
+
+          <div class="contact-avatar" id="contact-avatar">
+            <span id="contact-avatar-letter">?</span>
+
+            <span
+              class="contact-online"
+              id="contact-online"
+            ></span>
           </div>
+
 
           <div class="chat-contact-info">
 
             <div
               id="chat-with"
-              class="chat-name"
+              class="chat-with"
             >
               Select someone to message
             </div>
 
-            <div class="chat-security">
+            <div class="chat-status">
 
-              <span class="mini-lock">
-                ✓
-              </span>
+              <span class="status-dot"></span>
 
-              <span>
-                encrypted connection
+              <span id="chat-status-text">
+                Secure conversation
               </span>
 
             </div>
@@ -328,30 +394,57 @@
         </div>
 
 
-        <!-- AUDIO CALL -->
+        <!-- Header right -->
 
-        <button
-          id="call-btn"
-          type="button"
-          class="call-btn"
-          style="display: none;"
-          aria-label="Start audio call"
-        >
+        <div class="chat-header-actions">
 
-          <span class="call-icon">
-            ☎
-          </span>
+          <div class="encryption-indicator">
 
-          <span>
-            Audio call
-          </span>
+            <span class="encryption-icon">
+              ◆
+            </span>
 
-        </button>
+            <span class="encryption-label">
+              encrypted
+            </span>
+
+          </div>
+
+
+          <!-- AUDIO CALL BUTTON -->
+
+          <button
+            id="call-btn"
+            type="button"
+            class="call-btn"
+            style="display: none;"
+            aria-label="Start audio call"
+          >
+            <span class="call-icon">⌕</span>
+            <span class="call-text">Call</span>
+          </button>
+
+        </div>
 
       </header>
 
 
-      <!-- MESSAGES -->
+      <!-- Encryption banner -->
+
+      <div class="secure-banner">
+
+        <span class="secure-banner-icon">
+          ◆
+        </span>
+
+        <span>
+          Messages are encrypted locally on your device.
+        </span>
+
+      </div>
+
+
+      <!-- Messages -->
 
       <div
         id="messages"
@@ -359,7 +452,7 @@
       ></div>
 
 
-      <!-- MESSAGE INPUT -->
+      <!-- Message composer -->
 
       <form
         id="message-form"
@@ -368,8 +461,8 @@
 
         <div class="message-input-wrap">
 
-          <span class="message-lock">
-            ⌁
+          <span class="compose-lock">
+            ◆
           </span>
 
           <input
@@ -388,35 +481,25 @@
           class="send-btn"
           disabled
         >
-
-          <span class="send-text">
+          <span class="send-label">
             Send
           </span>
 
           <span class="send-arrow">
             ↑
           </span>
-
         </button>
 
       </form>
-
-      <div class="compose-security">
-
-        <span>⌁</span>
-
-        Messages are sealed before transmission
-
-      </div>
 
     </main>
 
   </section>
 
 
-  <!-- =========================
+  <!-- =========================================================
        AUDIO CALL MODAL
-  ========================== -->
+  ========================================================== -->
 
   <div
     id="call-modal"
@@ -424,25 +507,26 @@
     style="display: none;"
   >
 
-    <div class="call-backdrop"></div>
+    <div class="call-modal-backdrop"></div>
 
     <div class="call-card">
 
-      <div class="call-secure">
-        <span></span>
+      <div class="call-security">
+        <span class="security-dot"></span>
         secure audio
       </div>
 
-      <div class="calling-avatar">
 
-        <div class="avatar-ring ring-1"></div>
-        <div class="avatar-ring ring-2"></div>
+      <div class="call-avatar">
 
-        <div class="calling-avatar-inner">
-          <span id="call-avatar-letter">?</span>
-        </div>
+        <span id="call-avatar-letter">
+          ?
+        </span>
+
+        <span class="call-avatar-ring"></span>
 
       </div>
+
 
       <div
         id="call-status"
@@ -451,6 +535,7 @@
         Calling...
       </div>
 
+
       <div
         id="call-user-name"
         class="call-user-name"
@@ -458,13 +543,16 @@
         —
       </div>
 
-      <div class="call-encryption">
 
-        <span>✓</span>
+      <div class="call-wave">
 
-        <span>
-          End-to-end encrypted
-        </span>
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
 
       </div>
 
@@ -474,35 +562,43 @@
         <button
           id="accept-call-btn"
           class="call-action accept"
+          type="button"
           style="display: none;"
         >
-
-          <span>☎</span>
-          Accept
-
+          <span class="action-icon">✓</span>
+          <span>Accept</span>
         </button>
+
 
         <button
           id="reject-call-btn"
           class="call-action reject"
+          type="button"
           style="display: none;"
         >
-
-          <span>×</span>
-          Reject
-
+          <span class="action-icon">×</span>
+          <span>Reject</span>
         </button>
+
 
         <button
           id="end-call-btn"
-          class="call-action reject"
+          class="call-action end"
+          type="button"
           style="display: none;"
         >
-
-          <span>×</span>
-          End call
-
+          <span class="action-icon">×</span>
+          <span>End call</span>
         </button>
+
+      </div>
+
+
+      <div class="call-encryption-note">
+
+        <span>◆</span>
+
+        Audio is protected by your secure connection
 
       </div>
 
@@ -511,7 +607,9 @@
   </div>
 
 
-  <!-- REMOTE AUDIO -->
+  <!-- =========================================================
+       REMOTE AUDIO
+  ========================================================== -->
 
   <audio
     id="remote-audio"
@@ -520,12 +618,17 @@
   ></audio>
 
 
-  <!-- LIBSODIUM -->
+  <!-- =========================================================
+       LIBSODIUM
+  ========================================================== -->
 
   <script src="vendor/libsodium-sumo.js"></script>
   <script src="vendor/libsodium-wrappers.js"></script>
 
-  <!-- APPLICATION -->
+
+  <!-- =========================================================
+       APPLICATION
+  ========================================================== -->
 
   <script src="app.js"></script>
 
